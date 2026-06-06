@@ -190,6 +190,37 @@ const ORIENTS = [
   { id: "ccw90", label: "Rotate 90° CCW", deg: 270 },
 ];
 
+/* ════════ STEM PROMPT KIT — Midjourney prompts for cutout assets ════════
+   Cutout language differs from wreath-render language on purpose:
+   pure white isolation, single stem, shadowless even light, and foliage
+   laid horizontally (base left, tips right) so it imports tangent-ready. */
+const STEM_NO_BLOCK =
+  "--no vase, bouquet, multiple stems, second flower, hands, table, surface, " +
+  "background texture, cast shadow, drop shadow, fresh flowers, dew, water droplets, " +
+  "wilting, plastic shine, glossy petals, craft-store quality, hobby-store styling, " +
+  "text, watermark, frame, border";
+
+function stemPrompt(sku) {
+  const ph = PLACEHOLDERS[sku];
+  const name = ph ? ph.name : "[describe your stem — species, color]";
+  const isFoliage = ph ? ph.rotation_mode === "tangent" : false;
+  if (isFoliage) {
+    return "Single faux " + name + " greenery spray, isolated on pure white seamless background, " +
+      "professional catalog cutout photography, laid horizontally with stem base at the left edge and leaf tips extending right, " +
+      "entire spray visible including wired stem end, matte fabric leaves with realistic vein texture and structured leaf memory, " +
+      "flexible wired stem with floral tape wrap, soft even diffused studio lighting, completely shadowless, " +
+      "luxury faux botanical quality, premium silk greenery, no plastic shine " +
+      "--ar 3:2 --style raw --stylize 90 " + STEM_NO_BLOCK;
+  }
+  return "Single faux silk " + name + " stem, isolated on pure white seamless background, " +
+    "professional catalog cutout photography, bloom facing the camera directly, " +
+    "entire stem visible from bloom head down to wire stem end, " +
+    "matte silk petals with structured petal memory and visible fabric weave texture, " +
+    "realistic wired stem wrapped in green floral tape, soft even diffused studio lighting, completely shadowless, " +
+    "luxury faux botanical quality, premium artificial flower, no plastic shine " +
+    "--ar 2:3 --style raw --stylize 90 " + STEM_NO_BLOCK;
+}
+
 function drawGrapevine(ctx, cx, cy, rInner, rOuter, seed) {
   const rng = mulberry32(seed * 7919 + 13);
   const mid = (rInner + rOuter) / 2, band = (rOuter - rInner) / 2;
@@ -303,24 +334,38 @@ function buildInstances(bp, opts) {
   let idx = 0;
   const inSilence = (a) => silence.some((s) => inArc(a, s.from_deg, s.to_deg));
   const canopyPct = typeof canopy === "number" ? canopy : 0;
+  const density = Math.max(0.3, opts.foliageDensity || 1);
+  const flarePct = typeof opts.outerFlare === "number" ? opts.outerFlare : 0;
 
   (bp.foliage_sweeps || []).forEach((sw) => {
     const res = resolve(sw.item_id);
     if (!res) { rejected.push({ reason: "unresolved_sku", id: sw.item_id }); return; }
-    for (let a = sw.arc_from; a <= sw.arc_to; a += sw.step_deg) {
+    const step = sw.step_deg / density;
+    for (let a = sw.arc_from; a <= sw.arc_to; a += step) {
       const rng = mulberry32(bp.seed * 9973 + idx * 271 + 7);
-      const ang = normDeg(a + rrange(rng, -1, 1) * sw.step_deg * 0.35 * jitter);
+      const ang = normDeg(a + rrange(rng, -1, 1) * step * 0.35 * jitter);
       if (inSilence(ang)) { rejected.push({ reason: "silence_arc", id: sw.sweep_id }); idx++; continue; }
-      const rad = sw.radius_norm + rrange(rng, -0.045, 0.045) * jitter;
+      /* OUTER FLARE — seeded share of sprigs re-aimed past the outer rim,
+         tips pointing radially outward to build the wreath's silhouette */
+      const frng = mulberry32(bp.seed * 9973 + idx * 271 + 47);
+      const flared = frng() < flarePct;
+      let rad, rotation;
+      if (flared) {
+        rad = rrange(frng, 0.86, 0.97);
+        rotation = -(ang * D2R) + rrange(frng, -0.3, 0.3);
+      } else {
+        rad = sw.radius_norm + rrange(rng, -0.045, 0.045) * jitter;
+        const tangent = -(ang * D2R) + (sw.flow === "cw" ? Math.PI / 2 : -Math.PI / 2);
+        rotation = tangent + rrange(rng, -0.3, 0.3) * jitter;
+      }
       const pos = polarToXY(cx, cy, ang, rad * wreathRadiusPx);
-      const tangent = -(ang * D2R) + (sw.flow === "cw" ? Math.PI / 2 : -Math.PI / 2);
       instances.push({
         idx, item_id: sw.item_id, res, x: pos.x, y: pos.y,
-        rotation: tangent + rrange(rng, -0.3, 0.3) * jitter,
-        sizePx: res.real_width_in * pxPerIn * globalScale * rrange(rng, 0.85, 1.12),
+        rotation,
+        sizePx: res.real_width_in * pxPerIn * globalScale * rrange(rng, 0.85, 1.12) * (flared ? 0.85 : 1),
         mirror: rng() > 0.5, layer: res.layer_class,
         seedLocal: bp.seed * 9973 + idx * 271,
-        canopy: mulberry32(bp.seed * 9973 + idx * 271 + 31)() < canopyPct,
+        canopy: !flared && mulberry32(bp.seed * 9973 + idx * 271 + 31)() < canopyPct,
       });
       idx++;
     }
@@ -334,7 +379,8 @@ function buildInstances(bp, opts) {
     /* NESTING: under-collar — two foliage sprigs beneath every bloom cluster,
        fanned outward, so blooms sink into a greenery bed instead of bare ring */
     if (nesting && collarRes && cl.type !== "filler") {
-      for (let k = 0; k < 2; k++) {
+      const collarCount = density < 0.65 ? 1 : 2;
+      for (let k = 0; k < collarCount; k++) {
         const crng = mulberry32(bp.seed * 6131 + ci * 97 + k * 17 + 5);
         const cang = normDeg(cl.angle_deg + (k === 0 ? -1 : 1) * rrange(crng, 7, 15));
         if (!inSilence(cang)) {
@@ -406,14 +452,14 @@ function drawInstance(ctx, inst, mode) {
 }
 
 function renderComposite(canvas, bp, opts) {
-  const { layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve, sizePx, nesting, canopy } = opts;
+  const { layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve, sizePx, nesting, canopy, foliageDensity, outerFlare } = opts;
   const SZ = sizePx || 1400;
   canvas.width = SZ; canvas.height = SZ;
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = "#FCFBF8";
   ctx.fillRect(0, 0, SZ, SZ);
 
-  const built = buildInstances(bp, { canvasPx: SZ, jitter, globalScale, resolve, nesting, canopy });
+  const built = buildInstances(bp, { canvasPx: SZ, jitter, globalScale, resolve, nesting, canopy, foliageDensity, outerFlare });
   const { instances, rejected, pxPerIn, wreathRadiusPx, cx, cy } = built;
 
   if (layersOn.base) drawGrapevine(ctx, cx, cy, wreathRadiusPx * 0.62, wreathRadiusPx * 0.96, bp.seed);
@@ -541,6 +587,8 @@ function BRCApp() {
   const [lightAngle, setLightAngle] = useState(135);
   const [nesting, setNesting] = useState(true);
   const [canopyPct, setCanopyPct] = useState(0.3);
+  const [foliageDensity, setFoliageDensity] = useState(1.0);
+  const [outerFlare, setOuterFlare] = useState(0.25);
   const [showOverlay, setShowOverlay] = useState(false);
   const [showShadows, setShowShadows] = useState(true);
   const [layersOn, setLayersOn] = useState({ base: true, foliage: true, filler: true, secondary: true, focal: true });
@@ -552,6 +600,20 @@ function BRCApp() {
   const [assets, setAssets] = useState([]);
   const [openAsset, setOpenAsset] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [showKit, setShowKit] = useState(false);
+  const [copiedSku, setCopiedSku] = useState(null);
+
+  const copyPrompt = (sku) => {
+    const text = stemPrompt(sku);
+    const done = () => { setCopiedSku(sku); setTimeout(() => setCopiedSku(null), 1800); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => {
+        window.prompt("Copy the prompt:", text);
+      });
+    } else {
+      window.prompt("Copy the prompt:", text);
+    }
+  };
 
   const [edPrompt, setEdPrompt] = useState(DEFAULT_ED_PROMPT);
   const [edBusy, setEdBusy] = useState(false);
@@ -591,10 +653,10 @@ function BRCApp() {
     if (!canvasRef.current) return;
     const result = renderComposite(canvasRef.current, bp, {
       layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve, sizePx: 1400,
-      nesting, canopy: canopyPct,
+      nesting, canopy: canopyPct, foliageDensity, outerFlare,
     });
     setStats(result);
-  }, [bp, layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve, nesting, canopyPct]);
+  }, [bp, layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve, nesting, canopyPct, foliageDensity, outerFlare]);
 
   const rebuildAsset = (rec) => {
     const img = new Image();
@@ -715,13 +777,13 @@ function BRCApp() {
     const off = document.createElement("canvas");
     renderComposite(off, bp, {
       layersOn, showOverlay: false, showShadows, jitter, globalScale, lightAngle, resolve, sizePx: 3000,
-      nesting, canopy: canopyPct,
+      nesting, canopy: canopyPct, foliageDensity, outerFlare,
     });
     const a = document.createElement("a");
     a.href = off.toDataURL("image/png");
     a.download = (bp.blueprint_id || "EC_WR") + "_seed" + seed + "_proof_3000.png";
     a.click();
-  }, [bp, layersOn, showShadows, jitter, globalScale, lightAngle, resolve, seed, nesting, canopyPct]);
+  }, [bp, layersOn, showShadows, jitter, globalScale, lightAngle, resolve, seed, nesting, canopyPct, foliageDensity, outerFlare]);
 
   const runEditorial = useCallback(async () => {
     setEdBusy(true); setEdError(null); setEdResult(null);
@@ -729,7 +791,7 @@ function BRCApp() {
       const off = document.createElement("canvas");
       renderComposite(off, bp, {
         layersOn, showOverlay: false, showShadows, jitter, globalScale, lightAngle, resolve, sizePx: 1408,
-        nesting, canopy: canopyPct,
+        nesting, canopy: canopyPct, foliageDensity, outerFlare,
       });
       const proofDataUrl = off.toDataURL("image/jpeg", 0.92);
       const r = await fetch("/api/realism", {
@@ -746,7 +808,7 @@ function BRCApp() {
     } finally {
       setEdBusy(false);
     }
-  }, [edPrompt, bp, layersOn, showShadows, jitter, globalScale, lightAngle, resolve, nesting, canopyPct]);
+  }, [edPrompt, bp, layersOn, showShadows, jitter, globalScale, lightAngle, resolve, nesting, canopyPct, foliageDensity, outerFlare]);
 
   /* BLEND BOOST — feed the Editorial result back through a second pass
      focused purely on deepening the interweave */
@@ -842,6 +904,12 @@ function BRCApp() {
             <div style={S.sectionLabel}>Canopy Overlap — {Math.round(canopyPct * 100)}%</div>
             <input type="range" min="0" max="0.5" step="0.05" value={canopyPct}
               onChange={(e) => setCanopyPct(parseFloat(e.target.value))} style={S.slider} />
+            <div style={S.sectionLabel}>Foliage Density — {Math.round(foliageDensity * 100)}%</div>
+            <input type="range" min="0.3" max="1.6" step="0.05" value={foliageDensity}
+              onChange={(e) => setFoliageDensity(parseFloat(e.target.value))} style={S.slider} />
+            <div style={S.sectionLabel}>Outer Flare — {Math.round(outerFlare * 100)}%</div>
+            <input type="range" min="0" max="0.6" step="0.05" value={outerFlare}
+              onChange={(e) => setOuterFlare(parseFloat(e.target.value))} style={S.slider} />
             <div style={S.hint}>Collars bed every bloom in greenery; canopy redraws a seeded share of foliage OVER flower edges so the Proof interlaces before the AI ever sees it.</div>
           </div>
 
@@ -959,10 +1027,32 @@ function BRCApp() {
             </button>
             <button onClick={exportManifest} style={S.btnGhost} disabled={!assets.length}>Export Manifest</button>
             <button onClick={() => manifestRef.current && manifestRef.current.click()} style={S.btnGhost}>Import Manifest</button>
+            <button onClick={() => setShowKit((v) => !v)} style={S.btnGhost}>{showKit ? "Hide" : "Stem"} Prompt Kit</button>
           </div>
           <input ref={fileRef} type="file" accept="image/png,image/webp,image/jpeg" multiple style={{ display: "none" }} onChange={onFiles} />
           <input ref={manifestRef} type="file" accept="application/json" style={{ display: "none" }} onChange={importManifest} />
         </div>
+
+        {showKit && (
+          <div style={S.kitWrap}>
+            <div style={S.sectionLabel}>Stem Prompt Kit — generate cutouts for every slot</div>
+            <div style={S.hint}>
+              Paste each prompt into Midjourney, pick the cleanest result, upscale, and upload it here — the white background strips automatically.
+              Foliage prompts come out pre-oriented (base left, tips right) so they import tangent-ready with Orientation: As uploaded.
+            </div>
+            {blueprintSkus.map((sku) => (
+              <div key={sku} style={S.kitRow}>
+                <div style={S.kitHead}>
+                  <span style={S.kitName}>{sku}{PLACEHOLDERS[sku] ? " — " + PLACEHOLDERS[sku].name : ""}</span>
+                  <button onClick={() => copyPrompt(sku)} style={S.btnGhost}>
+                    {copiedSku === sku ? "Copied ✓" : "Copy Prompt"}
+                  </button>
+                </div>
+                <div style={S.kitPrompt}>{stemPrompt(sku)}</div>
+              </div>
+            ))}
+          </div>
+        )}
 
         {!assets.length && (
           <div style={S.empty}>
@@ -979,12 +1069,30 @@ function BRCApp() {
               <div style={S.assetFields}>
                 <label style={S.fieldLabel}>SKU mapping
                   <select value={blueprintSkus.includes(a.sku) ? a.sku : "__custom"}
-                    onChange={(e) => { if (e.target.value !== "__custom") updateAsset(a.id, { sku: e.target.value }); }}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === "__custom") return;
+                      /* inherit the slot's expected defaults — no guessing */
+                      const slot = PLACEHOLDERS[v];
+                      if (slot) {
+                        updateAsset(a.id, {
+                          sku: v,
+                          real_width_in: slot.real_width_in,
+                          layer_class: slot.layer_class,
+                          rotation_mode: slot.rotation_mode,
+                        });
+                      } else {
+                        updateAsset(a.id, { sku: v });
+                      }
+                    }}
                     style={S.select}>
-                    {blueprintSkus.map((s) => <option key={s} value={s}>{s}</option>)}
+                    {blueprintSkus.map((s) => <option key={s} value={s}>{s}{PLACEHOLDERS[s] ? " — " + PLACEHOLDERS[s].name : ""}</option>)}
                     <option value="__custom">custom…</option>
                   </select>
                 </label>
+                {PLACEHOLDERS[a.sku] && (
+                  <div style={S.hint}>Slot defaults applied: {PLACEHOLDERS[a.sku].real_width_in}″ · {PLACEHOLDERS[a.sku].layer_class} · {PLACEHOLDERS[a.sku].rotation_mode.replace("_", " ")}. Adjust only if your stem differs.</div>
+                )}
                 {!blueprintSkus.includes(a.sku) && (
                   <label style={S.fieldLabel}>Custom SKU
                     <input value={a.sku} onChange={(e) => updateAsset(a.id, { sku: e.target.value })} style={S.input} />
@@ -1085,6 +1193,11 @@ const S = {
   assetThumb: { maxHeight: 140, maxWidth: "92%", objectFit: "contain" },
   assetFields: { padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8 },
   fieldLabel: { fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "rgba(38,36,31,0.55)", display: "flex", flexDirection: "column", gap: 4, fontWeight: 500 },
+  kitWrap: { border: "1px dashed rgba(74,103,65,0.35)", borderRadius: 6, padding: "14px 16px", marginBottom: 16, background: "#FCFBF8" },
+  kitRow: { borderTop: "1px solid rgba(74,103,65,0.12)", padding: "12px 0" },
+  kitHead: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" },
+  kitName: { fontSize: 13, fontWeight: 600, color: "#2E3F2A" },
+  kitPrompt: { fontFamily: "ui-monospace, Menlo, monospace", fontSize: 11.5, lineHeight: 1.55, color: "rgba(38,36,31,0.75)", background: "#FFFFFF", border: "1px solid rgba(74,103,65,0.15)", borderRadius: 4, padding: "10px 12px", userSelect: "all", wordBreak: "break-word" },
   footer: { marginTop: 30, fontSize: 12, color: "rgba(38,36,31,0.5)", lineHeight: 1.6, borderTop: "1px solid rgba(74,103,65,0.16)", paddingTop: 16, maxWidth: 760 },
 };
 
