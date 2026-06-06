@@ -224,18 +224,30 @@ function stemPrompt(sku) {
 function drawGrapevine(ctx, cx, cy, rInner, rOuter, seed) {
   const rng = mulberry32(seed * 7919 + 13);
   const mid = (rInner + rOuter) / 2, band = (rOuter - rInner) / 2;
-  const browns = ["#8b6f4e", "#6e563c", "#a08660", "#7c6244", "#94795a"];
-  for (let i = 0; i < 150; i++) {
+  /* darker woody palette + thicker strokes so the base reads as grapevine,
+     not wire — the realism pass preserves what it sees */
+  const browns = ["#6b5138", "#54402c", "#7d6244", "#5e4a33", "#866a48", "#49382a"];
+  for (let i = 0; i < 190; i++) {
     const r = mid + rrange(rng, -band, band) * rrange(rng, 0.4, 1);
     const start = rng() * 360, span = rrange(rng, 35, 150);
     const wob = rrange(rng, -band * 0.35, band * 0.35);
     ctx.save(); ctx.translate(cx, cy); ctx.rotate(rng() * 0.06 - 0.03);
     ctx.strokeStyle = browns[Math.floor(rng() * browns.length)];
-    ctx.globalAlpha = rrange(rng, 0.22, 0.6);
-    ctx.lineWidth = rrange(rng, 1.4, 3.6);
+    ctx.globalAlpha = rrange(rng, 0.35, 0.8);
+    ctx.lineWidth = rrange(rng, 2.2, 5.5);
     ctx.beginPath();
     ctx.ellipse(0, 0, r + wob, r - wob, 0, -start * D2R, -(start + span) * D2R, true);
     ctx.stroke(); ctx.restore();
+  }
+  /* woody knots and crossover nubs for organic texture */
+  for (let k = 0; k < 26; k++) {
+    const ka = rng() * 360, kr = mid + rrange(rng, -band, band) * 0.8;
+    const p = polarToXY(cx, cy, ka, kr);
+    ctx.fillStyle = browns[Math.floor(rng() * browns.length)];
+    ctx.globalAlpha = rrange(rng, 0.35, 0.65);
+    ctx.beginPath();
+    ctx.ellipse(p.x, p.y, rrange(rng, 2.5, 6), rrange(rng, 1.5, 3.5), rng() * Math.PI, 0, Math.PI * 2);
+    ctx.fill();
   }
   ctx.globalAlpha = 1;
 }
@@ -821,7 +833,9 @@ function BRCApp() {
       const lock = Object.keys(counts).length
         ? "INVENTORY LOCK \u2014 this wreath contains exactly: " +
           Object.entries(counts).map(([n, c]) => c + "\u00d7 " + n).join(", ") +
-          ". Every one of these must appear in the output, unchanged in species and color. No other flowers or plants may be added. "
+          ". Every one of these must appear in the output, unchanged in species and color. No other flowers or plants may be added. " +
+          "The greenery must keep its full visible volume, leaf density, and leaf shape \u2014 do not thin, sparse, miniaturize, or convert the foliage into a different greenery species. " +
+          "The base is a natural brown grapevine wreath \u2014 render it as woven woody grapevine branches, not wire. "
         : "";
       const r = await fetch("/api/realism", {
         method: "POST",
