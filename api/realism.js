@@ -1,31 +1,17 @@
 /* ════════════════════════════════════════════════════════════════════
-   EVERCRAFTED — BRC PHASE 3 · REALISM PASS PROXY
-   Vercel serverless function. Drop this file at /api/realism.js in any
-   Vercel project (or a fresh one), set REPLICATE_API_TOKEN in the
-   project's Environment Variables, deploy. The Anthropic/Replicate key
-   NEVER touches the browser — established Evercrafted proxy pattern.
+   EVERCRAFTED — WREATH RENDER STUDIO · SERVER PROXY · v4
+   Upload this file INTO the api folder of your brc-proxy repo,
+   replacing the existing realism.js. (Open the api folder on GitHub
+   first, then Add file → Upload files, so it lands inside api/.)
 
-   Deploy steps:
-     1. mkdir brc-proxy && cd brc-proxy && mkdir api
-     2. save this file as api/realism.js
-     3. npx vercel  (link/create project)
-     4. npx vercel env add REPLICATE_API_TOKEN   (paste your token)
-     5. npx vercel --prod
-     6. Endpoint: https://<your-project>.vercel.app/api/realism
-        → paste that URL into the BRC-3.0 Editorial panel.
-
-   Model: black-forest-labs/flux-kontext-pro (instruction-based editing,
-   strongest structure preservation). An optional flux-dev strength path
-   is included below, clamped to the doctrine ceiling of 0.35.
+   New in v4: forwards a seed to the model, so the same Proof + same
+   prompt + same seed returns the same Editorial render. Reproducible.
    ════════════════════════════════════════════════════════════════════ */
 
 const REPLICATE_API = "https://api.replicate.com/v1";
 const KONTEXT_MODEL = "black-forest-labs/flux-kontext-pro";
-const FLUX_DEV_MODEL = "black-forest-labs/flux-dev";
-const MAX_STRENGTH = 0.35; // doctrine clamp — AI may retexture, never recompose
 
 export default async function handler(req, res) {
-  /* CORS — the claude.ai artifact (or your app) calls this directly */
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -36,38 +22,21 @@ export default async function handler(req, res) {
   if (!token) return res.status(500).json({ error: "REPLICATE_API_TOKEN not configured on server" });
 
   try {
-    const { image, prompt, mode = "kontext", strength = 0.3 } = req.body || {};
+    const { image, prompt, seed } = req.body || {};
     if (!image || !image.startsWith("data:image/")) {
       return res.status(400).json({ error: "Body must include `image` as a data URL" });
     }
     if (!prompt) return res.status(400).json({ error: "Body must include `prompt`" });
 
-    let model, input;
-    if (mode === "flux-dev") {
-      /* strength-based img2img path — hard clamp */
-      model = FLUX_DEV_MODEL;
-      input = {
-        prompt,
-        image,
-        prompt_strength: Math.min(MAX_STRENGTH, Math.max(0.15, Number(strength) || 0.3)),
-        num_inference_steps: 40,
-        guidance: 3,
-        output_format: "png",
-        disable_safety_checker: false,
-      };
-    } else {
-      /* default: Kontext instruction editing — preserves structure by design */
-      model = KONTEXT_MODEL;
-      input = {
-        prompt,
-        input_image: image,
-        output_format: "png",
-        safety_tolerance: 2,
-      };
-    }
+    const input = {
+      prompt,
+      input_image: image,
+      output_format: "png",
+      safety_tolerance: 2,
+    };
+    if (Number.isFinite(Number(seed))) input.seed = Math.floor(Number(seed));
 
-    /* Prefer: wait holds the connection until the prediction finishes (≤60s) */
-    const create = await fetch(`${REPLICATE_API}/models/${model}/predictions`, {
+    const create = await fetch(`${REPLICATE_API}/models/${KONTEXT_MODEL}/predictions`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -82,7 +51,6 @@ export default async function handler(req, res) {
       return res.status(create.status).json({ error: prediction?.detail || "Replicate request failed" });
     }
 
-    /* Poll if still running (rare with Prefer: wait, but safe) */
     let tries = 0;
     while (prediction.status && !["succeeded", "failed", "canceled"].includes(prediction.status) && tries < 60) {
       await new Promise((r) => setTimeout(r, 2000));
@@ -98,7 +66,7 @@ export default async function handler(req, res) {
     }
 
     const output = Array.isArray(prediction.output) ? prediction.output[0] : prediction.output;
-    return res.status(200).json({ output, id: prediction.id, model });
+    return res.status(200).json({ output, id: prediction.id, seed: input.seed ?? null });
   } catch (err) {
     return res.status(500).json({ error: err.message || "Realism pass failed" });
   }
