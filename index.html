@@ -285,6 +285,34 @@ const DEFAULT_ED_PROMPT =
   "Remove any white glow or halo around the elements. Soft natural daylight from upper left, matte silk petal texture, " +
   "dimensional layering. Premium e-commerce editorial photography, clean white background, no plastic shine.";
 
+/* ════════ PERSISTENCE — assets survive page reloads via IndexedDB ════════ */
+function idbOpen() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open("brc-compositor", 1);
+    r.onupgradeneeded = () => { r.result.createObjectStore("kv"); };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbSet(key, val) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction("kv", "readwrite");
+    tx.objectStore("kv").put(val, key);
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  });
+}
+async function idbGet(key) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction("kv", "readonly");
+    const q = tx.objectStore("kv").get(key);
+    q.onsuccess = () => res(q.result);
+    q.onerror = () => rej(q.error);
+  });
+}
+
 function prepareImage(img, orientDeg, stripWhite) {
   const rot = orientDeg % 360;
   const swap = rot === 90 || rot === 270;
@@ -764,6 +792,26 @@ function BRCApp() {
     a.click();
     URL.revokeObjectURL(a.href);
   };
+  const loadAssetRecord = (rec) => {
+    const id = __uid++;
+    const img = new Image();
+    img.onload = () => {
+      const o = ORIENTS.find((x) => x.id === rec.orient);
+      const prepared = prepareImage(img, o ? o.deg : 0, rec.strip_white !== false);
+      const silhouette = makeSilhouette(prepared);
+      setAssets((prev) => prev.concat([{
+        id, sku: rec.sku, name: rec.name, dataUrl: rec.image_dataurl,
+        real_width_in: rec.real_width_in != null ? rec.real_width_in : 3,
+        layer_class: rec.layer_class || "secondary",
+        rotation_mode: rec.rotation_mode || "camera_facing", orient: rec.orient || "none",
+        stripWhite: rec.strip_white !== false,
+        anchor: rec.anchor_point || { x: 0.5, y: 0.5 },
+        prepared, silhouette,
+      }]));
+    };
+    img.src = rec.image_dataurl;
+  };
+
   const importManifest = (e) => {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
@@ -771,30 +819,37 @@ function BRCApp() {
     reader.onload = () => {
       try {
         const data = JSON.parse(reader.result);
-        (data.assets || []).forEach((rec) => {
-          const id = __uid++;
-          const img = new Image();
-          img.onload = () => {
-            const o = ORIENTS.find((x) => x.id === rec.orient);
-            const prepared = prepareImage(img, o ? o.deg : 0, rec.strip_white !== false);
-            const silhouette = makeSilhouette(prepared);
-            setAssets((prev) => prev.concat([{
-              id, sku: rec.sku, name: rec.name, dataUrl: rec.image_dataurl,
-              real_width_in: rec.real_width_in != null ? rec.real_width_in : 3,
-              layer_class: rec.layer_class || "secondary",
-              rotation_mode: rec.rotation_mode || "camera_facing", orient: rec.orient || "none",
-              stripWhite: rec.strip_white !== false,
-              anchor: rec.anchor_point || { x: 0.5, y: 0.5 },
-              prepared, silhouette,
-            }]));
-          };
-          img.src = rec.image_dataurl;
-        });
+        (data.assets || []).forEach(loadAssetRecord);
       } catch (err) { alert("Manifest could not be read: " + err.message); }
     };
     reader.readAsText(file);
     e.target.value = "";
   };
+
+  /* restore the asset library on page load */
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    idbGet("assets").then((list) => {
+      if (Array.isArray(list) && list.length) list.forEach(loadAssetRecord);
+    }).catch(() => {});
+  }, []);
+
+  /* autosave the library (debounced) whenever it changes */
+  useEffect(() => {
+    if (!restoredRef.current) return;
+    const t = setTimeout(() => {
+      const out = assets.map((a) => ({
+        sku: a.sku, name: a.name, real_width_in: a.real_width_in,
+        layer_class: a.layer_class, rotation_mode: a.rotation_mode,
+        orient: a.orient, strip_white: a.stripWhite, anchor_point: a.anchor,
+        image_dataurl: a.dataUrl,
+      }));
+      idbSet("assets", out).catch(() => {});
+    }, 800);
+    return () => clearTimeout(t);
+  }, [assets]);
 
   const applyJson = useCallback(() => {
     try {
@@ -1062,7 +1117,7 @@ function BRCApp() {
           <div>
             <div style={S.sectionLabel}>Asset Library — your real stems</div>
             <div style={S.hint}>
-              Upload cutout PNGs (white backgrounds are stripped automatically). Tag SKU, true width, layer, and anchor. Export the manifest to keep your tagging.
+              Upload cutout PNGs (white backgrounds are stripped automatically). Tag SKU, true width, layer, and anchor. Your library now saves itself in this browser and survives reloads \u2014 the manifest export is your backup and your transfer between devices.
             </div>
           </div>
           <div style={S.row}>
