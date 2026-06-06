@@ -233,12 +233,14 @@ const SAMPLE_BLUEPRINT = {
 };
 
 const DEFAULT_ED_PROMPT =
-  "Transform this faux botanical wreath composite into a photorealistic premium product photograph. " +
-  "CRITICAL: keep every flower, stem, and leaf in its exact position — do not add, remove, move, or resize any element. " +
-  "Preserve the exact species, bloom colors, and the intentionally bare grapevine arc at the top. " +
-  "Unify the lighting into soft natural daylight from the upper left, blend each stem insertion naturally into the grapevine base, " +
-  "add realistic soft shadows, believable depth, and matte silk petal texture. " +
-  "Premium e-commerce editorial photography, clean white background, no plastic shine, no added decorations.";
+  "Transform this faux botanical wreath composite into a photorealistic premium product photograph of a single handcrafted wreath where everything is physically woven together. " +
+  "Keep every flower in its same location and the bare grapevine arc at the top, but deeply integrate the construction: " +
+  "sink every bloom down into a bed of surrounding foliage, arch leaves and greenery OVER the edges of flowers so blossoms are partially overlapped, " +
+  "weave stems visibly through and around the grapevine base, cross stems behind and in front of each other, " +
+  "fill small gaps between neighboring elements with the existing foliage so clusters merge into one continuous organic mass, " +
+  "and add deep insertion shadows where stems disappear into the arrangement. " +
+  "Dimensional layering, elements in front of and behind one another, soft natural daylight from upper left, matte silk petal texture. " +
+  "Premium e-commerce editorial photography, clean white background, no plastic shine.";
 
 function prepareImage(img, orientDeg, stripWhite) {
   const rot = orientDeg % 360;
@@ -291,7 +293,7 @@ function makeProceduralSilhouette(ph) {
 }
 
 function buildInstances(bp, opts) {
-  const { canvasPx, jitter, globalScale, resolve } = opts;
+  const { canvasPx, jitter, globalScale, resolve, nesting, canopy } = opts;
   const cx = canvasPx / 2, cy = canvasPx / 2;
   const fieldIn = bp.canvas.diameter_in + 5;
   const pxPerIn = canvasPx / fieldIn;
@@ -300,6 +302,7 @@ function buildInstances(bp, opts) {
   const instances = [], rejected = [];
   let idx = 0;
   const inSilence = (a) => silence.some((s) => inArc(a, s.from_deg, s.to_deg));
+  const canopyPct = typeof canopy === "number" ? canopy : 0;
 
   (bp.foliage_sweeps || []).forEach((sw) => {
     const res = resolve(sw.item_id);
@@ -317,12 +320,40 @@ function buildInstances(bp, opts) {
         sizePx: res.real_width_in * pxPerIn * globalScale * rrange(rng, 0.85, 1.12),
         mirror: rng() > 0.5, layer: res.layer_class,
         seedLocal: bp.seed * 9973 + idx * 271,
+        canopy: mulberry32(bp.seed * 9973 + idx * 271 + 31)() < canopyPct,
       });
       idx++;
     }
   });
 
-  (bp.clusters || []).forEach((cl) => {
+  /* foliage SKU available for nesting collars */
+  const collarSku = (bp.foliage_sweeps || []).map((s) => s.item_id).find((s) => resolve(s));
+  const collarRes = collarSku ? resolve(collarSku) : null;
+
+  (bp.clusters || []).forEach((cl, ci) => {
+    /* NESTING: under-collar — two foliage sprigs beneath every bloom cluster,
+       fanned outward, so blooms sink into a greenery bed instead of bare ring */
+    if (nesting && collarRes && cl.type !== "filler") {
+      for (let k = 0; k < 2; k++) {
+        const crng = mulberry32(bp.seed * 6131 + ci * 97 + k * 17 + 5);
+        const cang = normDeg(cl.angle_deg + (k === 0 ? -1 : 1) * rrange(crng, 7, 15));
+        if (!inSilence(cang)) {
+          const crad = cl.radius_norm - 0.015 + rrange(crng, -0.02, 0.02);
+          const cpos = polarToXY(cx, cy, cang, crad * wreathRadiusPx);
+          const ctan = -(cang * D2R) + (k === 0 ? -Math.PI / 2 : Math.PI / 2);
+          instances.push({
+            idx, item_id: collarSku, res: collarRes, x: cpos.x, y: cpos.y,
+            rotation: ctan + rrange(crng, -0.35, 0.35),
+            sizePx: collarRes.real_width_in * pxPerIn * globalScale * rrange(crng, 0.7, 0.9),
+            mirror: crng() > 0.5, layer: "foliage",
+            seedLocal: bp.seed * 6131 + ci * 97 + k * 17,
+            canopy: false,
+          });
+          idx++;
+        }
+      }
+    }
+
     cl.stems.forEach((stem) => {
       const res = resolve(stem.item_id);
       if (!res) { rejected.push({ reason: "unresolved_sku", id: stem.item_id }); return; }
@@ -331,7 +362,9 @@ function buildInstances(bp, opts) {
         const spread = stem.qty > 1 ? (q - (stem.qty - 1) / 2) * rrange(rng, 8, 13) : 0;
         const ang = normDeg(cl.angle_deg + spread + rrange(rng, -3, 3) * jitter);
         if (inSilence(ang)) { rejected.push({ reason: "silence_arc", id: cl.cluster_id }); idx++; continue; }
-        const rad = cl.radius_norm + rrange(rng, -0.05, 0.05) * jitter;
+        /* NESTING: pull blooms slightly inward into the foliage band */
+        const pullIn = nesting && res.rotation_mode === "camera_facing" ? 0.965 : 1;
+        const rad = (cl.radius_norm + rrange(rng, -0.05, 0.05) * jitter) * pullIn;
         const pos = polarToXY(cx, cy, ang, rad * wreathRadiusPx);
         instances.push({
           idx, item_id: stem.item_id, res, x: pos.x, y: pos.y,
@@ -340,6 +373,7 @@ function buildInstances(bp, opts) {
           mirror: rng() > 0.5 && res.rotation_mode === "camera_facing",
           layer: res.layer_class,
           seedLocal: bp.seed * 9973 + idx * 271,
+          canopy: false,
         });
         idx++;
       }
@@ -372,14 +406,14 @@ function drawInstance(ctx, inst, mode) {
 }
 
 function renderComposite(canvas, bp, opts) {
-  const { layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve, sizePx } = opts;
+  const { layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve, sizePx, nesting, canopy } = opts;
   const SZ = sizePx || 1400;
   canvas.width = SZ; canvas.height = SZ;
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = "#FCFBF8";
   ctx.fillRect(0, 0, SZ, SZ);
 
-  const built = buildInstances(bp, { canvasPx: SZ, jitter, globalScale, resolve });
+  const built = buildInstances(bp, { canvasPx: SZ, jitter, globalScale, resolve, nesting, canopy });
   const { instances, rejected, pxPerIn, wreathRadiusPx, cx, cy } = built;
 
   if (layersOn.base) drawGrapevine(ctx, cx, cy, wreathRadiusPx * 0.62, wreathRadiusPx * 0.96, bp.seed);
@@ -408,6 +442,18 @@ function renderComposite(canvas, bp, opts) {
       ctx.restore();
       ctx.filter = "none"; ctx.globalAlpha = 1;
     }
+    ctx.save();
+    ctx.translate(inst.x, inst.y);
+    ctx.rotate(inst.rotation);
+    if (inst.mirror) ctx.scale(-1, 1);
+    drawInstance(ctx, inst, "asset");
+    ctx.restore();
+  });
+
+  /* CANOPY PASS — seeded subset of foliage redrawn on top, so leaf tips
+     cross OVER bloom edges the way real greenery overlaps a built wreath */
+  instances.forEach((inst) => {
+    if (!inst.canopy || !layersOn[inst.layer]) return;
     ctx.save();
     ctx.translate(inst.x, inst.y);
     ctx.rotate(inst.rotation);
@@ -493,6 +539,8 @@ function BRCApp() {
   const [jitter, setJitter] = useState(0.7);
   const [globalScale, setGlobalScale] = useState(1.0);
   const [lightAngle, setLightAngle] = useState(135);
+  const [nesting, setNesting] = useState(true);
+  const [canopyPct, setCanopyPct] = useState(0.3);
   const [showOverlay, setShowOverlay] = useState(false);
   const [showShadows, setShowShadows] = useState(true);
   const [layersOn, setLayersOn] = useState({ base: true, foliage: true, filler: true, secondary: true, focal: true });
@@ -543,9 +591,10 @@ function BRCApp() {
     if (!canvasRef.current) return;
     const result = renderComposite(canvasRef.current, bp, {
       layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve, sizePx: 1400,
+      nesting, canopy: canopyPct,
     });
     setStats(result);
-  }, [bp, layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve]);
+  }, [bp, layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve, nesting, canopyPct]);
 
   const rebuildAsset = (rec) => {
     const img = new Image();
@@ -666,12 +715,13 @@ function BRCApp() {
     const off = document.createElement("canvas");
     renderComposite(off, bp, {
       layersOn, showOverlay: false, showShadows, jitter, globalScale, lightAngle, resolve, sizePx: 3000,
+      nesting, canopy: canopyPct,
     });
     const a = document.createElement("a");
     a.href = off.toDataURL("image/png");
     a.download = (bp.blueprint_id || "EC_WR") + "_seed" + seed + "_proof_3000.png";
     a.click();
-  }, [bp, layersOn, showShadows, jitter, globalScale, lightAngle, resolve, seed]);
+  }, [bp, layersOn, showShadows, jitter, globalScale, lightAngle, resolve, seed, nesting, canopyPct]);
 
   const runEditorial = useCallback(async () => {
     setEdBusy(true); setEdError(null); setEdResult(null);
@@ -679,6 +729,7 @@ function BRCApp() {
       const off = document.createElement("canvas");
       renderComposite(off, bp, {
         layersOn, showOverlay: false, showShadows, jitter, globalScale, lightAngle, resolve, sizePx: 1408,
+        nesting, canopy: canopyPct,
       });
       const proofDataUrl = off.toDataURL("image/jpeg", 0.92);
       const r = await fetch("/api/realism", {
@@ -695,7 +746,44 @@ function BRCApp() {
     } finally {
       setEdBusy(false);
     }
-  }, [edPrompt, bp, layersOn, showShadows, jitter, globalScale, lightAngle, resolve]);
+  }, [edPrompt, bp, layersOn, showShadows, jitter, globalScale, lightAngle, resolve, nesting, canopyPct]);
+
+  /* BLEND BOOST — feed the Editorial result back through a second pass
+     focused purely on deepening the interweave */
+  const BOOST_PROMPT =
+    "Deepen the physical integration of this wreath photograph while keeping every flower in its same location: " +
+    "arch more leaves over flower edges, sink blooms further into the foliage, merge neighboring clusters into one " +
+    "continuous organic mass, strengthen insertion shadows and depth layering. Photorealistic, matte silk texture, " +
+    "soft daylight from upper left, clean white background, nothing added or removed.";
+
+  const runBoost = useCallback(async () => {
+    if (!edResult) return;
+    setEdBusy(true); setEdError(null);
+    try {
+      /* pull the Editorial result down and convert to a data URL */
+      const imgResp = await fetch(edResult.url);
+      const blob = await imgResp.blob();
+      const dataUrl = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result);
+        fr.onerror = () => rej(new Error("Could not read Editorial image"));
+        fr.readAsDataURL(blob);
+      });
+      const r = await fetch("/api/realism", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: dataUrl, prompt: BOOST_PROMPT, mode: "kontext" }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error((data && data.error) || ("Proxy returned " + r.status));
+      if (!data.output) throw new Error("Proxy returned no output image");
+      setEdResult({ url: data.output, proofDataUrl: edResult.proofDataUrl });
+    } catch (err) {
+      setEdError(err.message || "Blend boost failed");
+    } finally {
+      setEdBusy(false);
+    }
+  }, [edResult]);
 
   const mappedCount = blueprintSkus.filter((s) => assets.some((a) => a.sku === s && a.prepared)).length;
   const silenceRejects = stats.rejected.filter((r) => r.reason === "silence_arc").length;
@@ -743,6 +831,18 @@ function BRCApp() {
             <div style={S.sectionLabel}>Key Light — {lightAngle}°</div>
             <input type="range" min="0" max="360" step="5" value={lightAngle}
               onChange={(e) => setLightAngle(parseInt(e.target.value, 10))} style={S.slider} />
+          </div>
+
+          <div style={S.section}>
+            <div style={S.sectionLabel}>Nesting — built, not placed</div>
+            <label style={S.check}>
+              <input type="checkbox" checked={nesting} onChange={() => setNesting((v) => !v)} />
+              <span>Foliage collars under blooms</span>
+            </label>
+            <div style={S.sectionLabel}>Canopy Overlap — {Math.round(canopyPct * 100)}%</div>
+            <input type="range" min="0" max="0.5" step="0.05" value={canopyPct}
+              onChange={(e) => setCanopyPct(parseFloat(e.target.value))} style={S.slider} />
+            <div style={S.hint}>Collars bed every bloom in greenery; canopy redraws a seeded share of foliage OVER flower edges so the Proof interlaces before the AI ever sees it.</div>
           </div>
 
           <div style={S.section}>
@@ -833,6 +933,9 @@ function BRCApp() {
                     <a href={edResult.url} target="_blank" rel="noreferrer" style={Object.assign({}, S.btnPrimary, { textDecoration: "none", display: "inline-block" })}>
                       Accept · Open Full Size
                     </a>
+                    <button onClick={runBoost} disabled={edBusy} style={S.btnGhost}>
+                      {edBusy ? "Boosting…" : "Blend Boost — weave deeper"}
+                    </button>
                     <button onClick={() => setEdResult(null)} style={S.btnDanger}>Reject — keep Proof</button>
                   </div>
                 </div>
