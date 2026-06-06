@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Evercrafted — Blueprint-to-Render Compositor</title>
+<title>Evercrafted — Wreath Render Studio</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
@@ -21,13 +21,19 @@
 <div id="root"></div>
 <script type="text/babel" data-presets="env,react">
 /* ════════════════════════════════════════════════════════════════════
-   EVERCRAFTED — BLUEPRINT-TO-RENDER COMPOSITOR · BRC-3.0 · HOSTED
-   This file lives at the ROOT of the brc-proxy Vercel project, next to
-   the /api folder. Served from the same domain as api/realism.js, the
-   Editorial pass is same-origin — no sandbox, no CORS, no setup.
+   EVERCRAFTED — WREATH RENDER STUDIO · BRC-4.0
+   Clean rebuild. Operating rules of this version:
+   1. PROMPTS ARE FROZEN PRESETS. The app never edits them. You select.
+   2. EVERY EDITORIAL RENDER IS SEEDED. Same Proof + prompt + seed =
+      same result, forever. Reproducible by design.
+   3. EVERY RENDER IS LOGGED. The history panel keeps each result with
+      its exact preset + seed, persisted in this browser. Nothing that
+      works can be lost again.
+   4. The Proof is deterministic and authoritative. AI never places.
    ════════════════════════════════════════════════════════════════════ */
 const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
+/* ─────────── seeded RNG + polar math ─────────── */
 function mulberry32(seed) {
   let a = seed >>> 0;
   return function () {
@@ -48,7 +54,64 @@ function polarToXY(cx, cy, angleDeg, radiusPx) {
   return { x: cx + radiusPx * Math.cos(angleDeg * D2R), y: cy - radiusPx * Math.sin(angleDeg * D2R) };
 }
 
-/* ════════ procedural placeholders ════════ */
+/* ─────────── IndexedDB persistence ─────────── */
+function idbOpen() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open("ec-render-studio", 1);
+    r.onupgradeneeded = () => { r.result.createObjectStore("kv"); };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbSet(key, val) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction("kv", "readwrite");
+    tx.objectStore("kv").put(val, key);
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  });
+}
+async function idbGet(key) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction("kv", "readonly");
+    const q = tx.objectStore("kv").get(key);
+    q.onsuccess = () => res(q.result);
+    q.onerror = () => rej(q.error);
+  });
+}
+
+/* ═══════════ FROZEN PROMPT PRESETS — read-only, never modified ═══════════ */
+const PROMPT_PRESETS = {
+  faithful: {
+    label: "V1 — Faithful (recommended)",
+    text:
+      "Transform this faux botanical wreath composite into a photorealistic premium product photograph. " +
+      "CRITICAL: keep every flower, stem, and leaf in its exact position — do not add, remove, move, or resize any element. " +
+      "Preserve the exact species, bloom colors, and the intentionally bare grapevine arc. " +
+      "Unify the lighting into soft natural daylight from the upper left, blend each stem insertion naturally into the grapevine base, " +
+      "add realistic soft shadows, believable depth, and matte silk petal texture. " +
+      "Premium e-commerce editorial photography, clean white background, no plastic shine, no added decorations.",
+  },
+  integrated: {
+    label: "V2 — Integrated (deeper weave, more drift risk)",
+    text:
+      "Transform this faux botanical wreath composite into a photorealistic premium product photograph of a single handcrafted wreath. " +
+      "Keep every flower in its same location and the bare grapevine arc, but integrate the construction where elements already touch: " +
+      "tuck bloom bases into the greenery beneath them, let existing leaves overlap neighboring flower edges, " +
+      "weave existing stems into the grapevine base, and add deep insertion shadows. " +
+      "Do not remove or replace any element. Dimensional layering, soft daylight from upper left, matte silk texture. " +
+      "Premium editorial photography, clean white background, no plastic shine.",
+  },
+  custom: { label: "Custom (yours, editable, saved in this browser)", text: "" },
+};
+
+const INVENTORY_LOCK_TAIL =
+  ". Every one of these must appear in the output, unchanged in species and color. No other flowers or plants may be added. " +
+  "The greenery keeps its visible volume and leaf shape. The base is a natural brown grapevine wreath. ";
+
+/* ═══════════ procedural placeholders (fallbacks only) ═══════════ */
 function drawHydrangea(ctx, rng, size) {
   const R = size / 2;
   for (let i = 0; i < 54; i++) {
@@ -190,16 +253,12 @@ const ORIENTS = [
   { id: "ccw90", label: "Rotate 90° CCW", deg: 270 },
 ];
 
-/* ════════ STEM PROMPT KIT — Midjourney prompts for cutout assets ════════
-   Cutout language differs from wreath-render language on purpose:
-   pure white isolation, single stem, shadowless even light, and foliage
-   laid horizontally (base left, tips right) so it imports tangent-ready. */
+/* ═══════════ STEM PROMPT KIT ═══════════ */
 const STEM_NO_BLOCK =
   "--no vase, bouquet, multiple stems, second flower, hands, table, surface, " +
   "background texture, cast shadow, drop shadow, fresh flowers, dew, water droplets, " +
   "wilting, plastic shine, glossy petals, craft-store quality, hobby-store styling, " +
   "text, watermark, frame, border";
-
 function stemPrompt(sku) {
   const ph = PLACEHOLDERS[sku];
   const name = ph ? ph.name : "[describe your stem — species, color]";
@@ -221,98 +280,7 @@ function stemPrompt(sku) {
     "--ar 2:3 --style raw --stylize 90 " + STEM_NO_BLOCK;
 }
 
-function drawGrapevine(ctx, cx, cy, rInner, rOuter, seed) {
-  const rng = mulberry32(seed * 7919 + 13);
-  const mid = (rInner + rOuter) / 2, band = (rOuter - rInner) / 2;
-  /* darker woody palette + thicker strokes so the base reads as grapevine,
-     not wire — the realism pass preserves what it sees */
-  const browns = ["#6b5138", "#54402c", "#7d6244", "#5e4a33", "#866a48", "#49382a"];
-  for (let i = 0; i < 190; i++) {
-    const r = mid + rrange(rng, -band, band) * rrange(rng, 0.4, 1);
-    const start = rng() * 360, span = rrange(rng, 35, 150);
-    const wob = rrange(rng, -band * 0.35, band * 0.35);
-    ctx.save(); ctx.translate(cx, cy); ctx.rotate(rng() * 0.06 - 0.03);
-    ctx.strokeStyle = browns[Math.floor(rng() * browns.length)];
-    ctx.globalAlpha = rrange(rng, 0.35, 0.8);
-    ctx.lineWidth = rrange(rng, 2.2, 5.5);
-    ctx.beginPath();
-    ctx.ellipse(0, 0, r + wob, r - wob, 0, -start * D2R, -(start + span) * D2R, true);
-    ctx.stroke(); ctx.restore();
-  }
-  /* woody knots and crossover nubs for organic texture */
-  for (let k = 0; k < 26; k++) {
-    const ka = rng() * 360, kr = mid + rrange(rng, -band, band) * 0.8;
-    const p = polarToXY(cx, cy, ka, kr);
-    ctx.fillStyle = browns[Math.floor(rng() * browns.length)];
-    ctx.globalAlpha = rrange(rng, 0.35, 0.65);
-    ctx.beginPath();
-    ctx.ellipse(p.x, p.y, rrange(rng, 2.5, 6), rrange(rng, 1.5, 3.5), rng() * Math.PI, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.globalAlpha = 1;
-}
-
-const SAMPLE_BLUEPRINT = {
-  blueprint_id: "EC_WR_V2_4217",
-  formula: "Crescent",
-  seed: 42,
-  emotional_tags: ["airy", "calm", "fresh"],
-  canvas: { type: "polar", diameter_in: 24 },
-  silence_arcs: [{ from_deg: 82, to_deg: 168 }],
-  foliage_sweeps: [
-    { sweep_id: "F1", item_id: "PH-FOL-SAGE", arc_from: 188, arc_to: 425, step_deg: 14, radius_norm: 0.8, flow: "cw" },
-    { sweep_id: "F2", item_id: "PH-FOL-EUC", arc_from: 215, arc_to: 400, step_deg: 22, radius_norm: 0.76, flow: "cw" },
-  ],
-  clusters: [
-    { cluster_id: "C1", type: "focal",     angle_deg: 305, radius_norm: 0.78, stems: [{ item_id: "PH-HYD-BLUE", qty: 1 }] },
-    { cluster_id: "C2", type: "secondary", angle_deg: 332, radius_norm: 0.80, stems: [{ item_id: "PH-RAN-WHITE", qty: 3 }] },
-    { cluster_id: "C3", type: "secondary", angle_deg: 276, radius_norm: 0.80, stems: [{ item_id: "PH-LIS-IVORY", qty: 2 }] },
-    { cluster_id: "C4", type: "secondary", angle_deg: 244, radius_norm: 0.78, stems: [{ item_id: "PH-RAN-WHITE", qty: 2 }] },
-    { cluster_id: "C5", type: "accent",    angle_deg: 355, radius_norm: 0.82, stems: [{ item_id: "PH-LIS-IVORY", qty: 1 }] },
-    { cluster_id: "C6", type: "filler",    angle_deg: 318, radius_norm: 0.84, stems: [{ item_id: "PH-WAX-WHITE", qty: 3 }] },
-    { cluster_id: "C7", type: "filler",    angle_deg: 222, radius_norm: 0.80, stems: [{ item_id: "PH-WAX-WHITE", qty: 2 }] },
-    { cluster_id: "C8", type: "filler",    angle_deg: 18,  radius_norm: 0.80, stems: [{ item_id: "PH-WAX-WHITE", qty: 2 }] },
-  ],
-};
-
-const DEFAULT_ED_PROMPT =
-  "Transform this faux botanical wreath composite into a photorealistic premium product photograph of a single handcrafted wreath. " +
-  "STRICT PRESERVATION: keep the exact same number of flowers and greenery sprays, the exact same species, shapes, and colors, " +
-  "in their exact same locations. Do not simplify, remove, replace, or redesign any element. Do not invent new flower types. " +
-  "INTEGRATION (the only changes allowed): blend the existing elements where they already touch \u2014 tuck bloom bases into the " +
-  "greenery beneath them, let existing leaves overlap neighboring flower edges, weave existing stems into the grapevine base, " +
-  "and add deep insertion shadows where stems enter the arrangement. " +
-  "Remove any white glow or halo around the elements. Soft natural daylight from upper left, matte silk petal texture, " +
-  "dimensional layering. Premium e-commerce editorial photography, clean white background, no plastic shine.";
-
-/* ════════ PERSISTENCE — assets survive page reloads via IndexedDB ════════ */
-function idbOpen() {
-  return new Promise((res, rej) => {
-    const r = indexedDB.open("brc-compositor", 1);
-    r.onupgradeneeded = () => { r.result.createObjectStore("kv"); };
-    r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
-  });
-}
-async function idbSet(key, val) {
-  const db = await idbOpen();
-  return new Promise((res, rej) => {
-    const tx = db.transaction("kv", "readwrite");
-    tx.objectStore("kv").put(val, key);
-    tx.oncomplete = () => res();
-    tx.onerror = () => rej(tx.error);
-  });
-}
-async function idbGet(key) {
-  const db = await idbOpen();
-  return new Promise((res, rej) => {
-    const tx = db.transaction("kv", "readonly");
-    const q = tx.objectStore("kv").get(key);
-    q.onsuccess = () => res(q.result);
-    q.onerror = () => rej(q.error);
-  });
-}
-
+/* ═══════════ asset preparation (white strip + edge choke) ═══════════ */
 function prepareImage(img, orientDeg, stripWhite) {
   const rot = orientDeg % 360;
   const swap = rot === 90 || rot === 270;
@@ -334,9 +302,6 @@ function prepareImage(img, orientDeg, stripWhite) {
       if (lum > 248) d[i + 3] = 0;
       else if (lum > 232) d[i + 3] = Math.min(d[i + 3], Math.round(((248 - lum) / 16) * 255));
     }
-    /* EDGE CHOKE — erode the soft white fringe so stems sit clean on the
-       canvas instead of glowing. Two passes: kill semi-transparent pixels
-       that touch fully transparent ones. */
     for (let pass = 0; pass < 2; pass++) {
       const kill = [];
       for (let y = 1; y < h - 1; y++) {
@@ -378,6 +343,59 @@ function makeProceduralSilhouette(ph) {
   return cv;
 }
 
+/* ═══════════ grapevine base — woody, reads as vine ═══════════ */
+function drawGrapevine(ctx, cx, cy, rInner, rOuter, seed) {
+  const rng = mulberry32(seed * 7919 + 13);
+  const mid = (rInner + rOuter) / 2, band = (rOuter - rInner) / 2;
+  const browns = ["#6b5138", "#54402c", "#7d6244", "#5e4a33", "#866a48", "#49382a"];
+  for (let i = 0; i < 190; i++) {
+    const r = mid + rrange(rng, -band, band) * rrange(rng, 0.4, 1);
+    const start = rng() * 360, span = rrange(rng, 35, 150);
+    const wob = rrange(rng, -band * 0.35, band * 0.35);
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(rng() * 0.06 - 0.03);
+    ctx.strokeStyle = browns[Math.floor(rng() * browns.length)];
+    ctx.globalAlpha = rrange(rng, 0.35, 0.8);
+    ctx.lineWidth = rrange(rng, 2.2, 5.5);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, r + wob, r - wob, 0, -start * D2R, -(start + span) * D2R, true);
+    ctx.stroke(); ctx.restore();
+  }
+  for (let k = 0; k < 26; k++) {
+    const ka = rng() * 360, kr = mid + rrange(rng, -band, band) * 0.8;
+    const p = polarToXY(cx, cy, ka, kr);
+    ctx.fillStyle = browns[Math.floor(rng() * browns.length)];
+    ctx.globalAlpha = rrange(rng, 0.35, 0.65);
+    ctx.beginPath();
+    ctx.ellipse(p.x, p.y, rrange(rng, 2.5, 6), rrange(rng, 1.5, 3.5), rng() * Math.PI, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* ═══════════ sample blueprint ═══════════ */
+const SAMPLE_BLUEPRINT = {
+  blueprint_id: "EC_WR_V2_4217",
+  formula: "Crescent",
+  seed: 42,
+  canvas: { type: "polar", diameter_in: 24 },
+  silence_arcs: [{ from_deg: 82, to_deg: 168 }],
+  foliage_sweeps: [
+    { sweep_id: "F1", item_id: "PH-FOL-SAGE", arc_from: 188, arc_to: 425, step_deg: 14, radius_norm: 0.8, flow: "cw" },
+    { sweep_id: "F2", item_id: "PH-FOL-EUC", arc_from: 215, arc_to: 400, step_deg: 22, radius_norm: 0.76, flow: "cw" },
+  ],
+  clusters: [
+    { cluster_id: "C1", type: "focal",     angle_deg: 305, radius_norm: 0.78, stems: [{ item_id: "PH-HYD-BLUE", qty: 1 }] },
+    { cluster_id: "C2", type: "secondary", angle_deg: 332, radius_norm: 0.80, stems: [{ item_id: "PH-RAN-WHITE", qty: 3 }] },
+    { cluster_id: "C3", type: "secondary", angle_deg: 276, radius_norm: 0.80, stems: [{ item_id: "PH-LIS-IVORY", qty: 2 }] },
+    { cluster_id: "C4", type: "secondary", angle_deg: 244, radius_norm: 0.78, stems: [{ item_id: "PH-RAN-WHITE", qty: 2 }] },
+    { cluster_id: "C5", type: "accent",    angle_deg: 355, radius_norm: 0.82, stems: [{ item_id: "PH-LIS-IVORY", qty: 1 }] },
+    { cluster_id: "C6", type: "filler",    angle_deg: 318, radius_norm: 0.84, stems: [{ item_id: "PH-WAX-WHITE", qty: 3 }] },
+    { cluster_id: "C7", type: "filler",    angle_deg: 222, radius_norm: 0.80, stems: [{ item_id: "PH-WAX-WHITE", qty: 2 }] },
+    { cluster_id: "C8", type: "filler",    angle_deg: 18,  radius_norm: 0.80, stems: [{ item_id: "PH-WAX-WHITE", qty: 2 }] },
+  ],
+};
+
+/* ═══════════ placement engine ═══════════ */
 function buildInstances(bp, opts) {
   const { canvasPx, jitter, globalScale, resolve, nesting, canopy } = opts;
   const cx = canvasPx / 2, cy = canvasPx / 2;
@@ -400,8 +418,6 @@ function buildInstances(bp, opts) {
       const rng = mulberry32(bp.seed * 9973 + idx * 271 + 7);
       const ang = normDeg(a + rrange(rng, -1, 1) * step * 0.35 * jitter);
       if (inSilence(ang)) { rejected.push({ reason: "silence_arc", id: sw.sweep_id }); idx++; continue; }
-      /* OUTER FLARE — seeded share of sprigs re-aimed past the outer rim,
-         tips pointing radially outward to build the wreath's silhouette */
       const frng = mulberry32(bp.seed * 9973 + idx * 271 + 47);
       const flared = frng() < flarePct;
       let rad, rotation;
@@ -415,8 +431,7 @@ function buildInstances(bp, opts) {
       }
       const pos = polarToXY(cx, cy, ang, rad * wreathRadiusPx);
       instances.push({
-        idx, item_id: sw.item_id, res, x: pos.x, y: pos.y,
-        rotation,
+        idx, item_id: sw.item_id, res, x: pos.x, y: pos.y, rotation,
         sizePx: res.real_width_in * pxPerIn * globalScale * rrange(rng, 0.85, 1.12) * (flared ? 0.85 : 1),
         mirror: rng() > 0.5, layer: res.layer_class,
         seedLocal: bp.seed * 9973 + idx * 271,
@@ -426,13 +441,10 @@ function buildInstances(bp, opts) {
     }
   });
 
-  /* foliage SKU available for nesting collars */
   const collarSku = (bp.foliage_sweeps || []).map((s) => s.item_id).find((s) => resolve(s));
   const collarRes = collarSku ? resolve(collarSku) : null;
 
   (bp.clusters || []).forEach((cl, ci) => {
-    /* NESTING: under-collar — two foliage sprigs beneath every bloom cluster,
-       fanned outward, so blooms sink into a greenery bed instead of bare ring */
     if (nesting && collarRes && cl.type !== "filler") {
       const collarCount = density < 0.65 ? 1 : 2;
       for (let k = 0; k < collarCount; k++) {
@@ -454,7 +466,6 @@ function buildInstances(bp, opts) {
         }
       }
     }
-
     cl.stems.forEach((stem) => {
       const res = resolve(stem.item_id);
       if (!res) { rejected.push({ reason: "unresolved_sku", id: stem.item_id }); return; }
@@ -463,7 +474,6 @@ function buildInstances(bp, opts) {
         const spread = stem.qty > 1 ? (q - (stem.qty - 1) / 2) * rrange(rng, 8, 13) : 0;
         const ang = normDeg(cl.angle_deg + spread + rrange(rng, -3, 3) * jitter);
         if (inSilence(ang)) { rejected.push({ reason: "silence_arc", id: cl.cluster_id }); idx++; continue; }
-        /* NESTING: pull blooms slightly inward into the foliage band */
         const pullIn = nesting && res.rotation_mode === "camera_facing" ? 0.965 : 1;
         const rad = (cl.radius_norm + rrange(rng, -0.05, 0.05) * jitter) * pullIn;
         const pos = polarToXY(cx, cy, ang, rad * wreathRadiusPx);
@@ -551,8 +561,7 @@ function renderComposite(canvas, bp, opts) {
     ctx.restore();
   });
 
-  /* CANOPY PASS — seeded subset of foliage redrawn on top, so leaf tips
-     cross OVER bloom edges the way real greenery overlaps a built wreath */
+  /* canopy pass — seeded foliage subset over bloom edges */
   instances.forEach((inst) => {
     if (!inst.canopy || !layersOn[inst.layer]) return;
     ctx.save();
@@ -592,6 +601,7 @@ function renderComposite(canvas, bp, opts) {
     });
     ctx.restore();
   }
+
   const itemCounts = {};
   instances.forEach((inst) => {
     const nm = (inst.res && (inst.res.name || (PLACEHOLDERS[inst.item_id] && PLACEHOLDERS[inst.item_id].name))) || inst.item_id;
@@ -600,6 +610,7 @@ function renderComposite(canvas, bp, opts) {
   return { count: instances.length, rejected, pxPerIn, itemCounts };
 }
 
+/* ═══════════ anchor picker ═══════════ */
 function AnchorPicker({ asset, onSet }) {
   const ref = useRef(null);
   useEffect(() => {
@@ -635,60 +646,58 @@ function AnchorPicker({ asset, onSet }) {
   );
 }
 
+/* ═══════════════════════════ APP ═══════════════════════════ */
 let __uid = 1;
-function BRCApp() {
+function Studio() {
   const canvasRef = useRef(null);
   const fileRef = useRef(null);
   const manifestRef = useRef(null);
 
+  /* composition */
   const [seed, setSeed] = useState(42);
-  const [jitter, setJitter] = useState(0.7);
-  const [globalScale, setGlobalScale] = useState(1.0);
+  const [jitter, setJitter] = useState(0.75);
+  const [globalScale, setGlobalScale] = useState(1.05);
   const [lightAngle, setLightAngle] = useState(135);
   const [nesting, setNesting] = useState(true);
-  const [canopyPct, setCanopyPct] = useState(0.3);
-  const [foliageDensity, setFoliageDensity] = useState(1.0);
+  const [canopyPct, setCanopyPct] = useState(0.25);
+  const [foliageDensity, setFoliageDensity] = useState(0.55);
   const [outerFlare, setOuterFlare] = useState(0.25);
   const [showOverlay, setShowOverlay] = useState(false);
   const [showShadows, setShowShadows] = useState(true);
   const [layersOn, setLayersOn] = useState({ base: true, foliage: true, filler: true, secondary: true, focal: true });
+
+  /* blueprint */
   const [jsonText, setJsonText] = useState(JSON.stringify(SAMPLE_BLUEPRINT, null, 2));
   const [blueprint, setBlueprint] = useState(SAMPLE_BLUEPRINT);
   const [jsonError, setJsonError] = useState(null);
-  const [stats, setStats] = useState({ count: 0, rejected: [], pxPerIn: 0 });
   const [showJson, setShowJson] = useState(false);
+
+  /* assets */
   const [assets, setAssets] = useState([]);
   const [openAsset, setOpenAsset] = useState(null);
   const [busy, setBusy] = useState(false);
   const [showKit, setShowKit] = useState(false);
   const [copiedSku, setCopiedSku] = useState(null);
 
-  const copyPrompt = (sku) => {
-    const text = stemPrompt(sku);
-    const done = () => { setCopiedSku(sku); setTimeout(() => setCopiedSku(null), 1800); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(done).catch(() => {
-        window.prompt("Copy the prompt:", text);
-      });
-    } else {
-      window.prompt("Copy the prompt:", text);
-    }
-  };
-
-  const [edPrompt, setEdPrompt] = useState(DEFAULT_ED_PROMPT);
+  /* editorial */
+  const [presetKey, setPresetKey] = useState("faithful");
+  const [customPrompt, setCustomPrompt] = useState("");
+  const [useLock, setUseLock] = useState(true);
+  const [edSeed, setEdSeed] = useState(1234);
   const [edBusy, setEdBusy] = useState(false);
   const [edError, setEdError] = useState(null);
-  const [edResult, setEdResult] = useState(null);
+  const [current, setCurrent] = useState(null);   // latest render {url, proofThumb, seed, preset, ts}
+  const [history, setHistory] = useState([]);
+
+  const [stats, setStats] = useState({ count: 0, rejected: [], pxPerIn: 0, itemCounts: {} });
 
   const bp = useMemo(() => Object.assign({}, blueprint, { seed }), [blueprint, seed]);
-
   const blueprintSkus = useMemo(() => {
     const s = new Set();
     (bp.foliage_sweeps || []).forEach((f) => s.add(f.item_id));
     (bp.clusters || []).forEach((c) => c.stems.forEach((st) => s.add(st.item_id)));
     return Array.from(s);
   }, [bp]);
-
   const phSil = useMemo(() => {
     const m = {};
     Object.entries(PLACEHOLDERS).forEach(([k, ph]) => { m[k] = makeProceduralSilhouette(ph); });
@@ -701,8 +710,7 @@ function BRCApp() {
       return {
         kind: "image", prepared: up.prepared, silhouette: up.silhouette,
         anchor: up.anchor, real_width_in: up.real_width_in,
-        layer_class: up.layer_class, rotation_mode: up.rotation_mode,
-        name: up.name,
+        layer_class: up.layer_class, rotation_mode: up.rotation_mode, name: up.name,
       };
     }
     const ph = PLACEHOLDERS[sku];
@@ -710,88 +718,15 @@ function BRCApp() {
     return null;
   }, [assets, phSil]);
 
+  const renderOpts = { layersOn, showShadows, jitter, globalScale, lightAngle, resolve, nesting, canopy: canopyPct, foliageDensity, outerFlare };
+
   useEffect(() => {
     if (!canvasRef.current) return;
-    const result = renderComposite(canvasRef.current, bp, {
-      layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve, sizePx: 1400,
-      nesting, canopy: canopyPct, foliageDensity, outerFlare,
-    });
+    const result = renderComposite(canvasRef.current, bp, Object.assign({}, renderOpts, { showOverlay, sizePx: 1400 }));
     setStats(result);
   }, [bp, layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve, nesting, canopyPct, foliageDensity, outerFlare]);
 
-  const rebuildAsset = (rec) => {
-    const img = new Image();
-    img.onload = () => {
-      const o = ORIENTS.find((x) => x.id === rec.orient);
-      const prepared = prepareImage(img, o ? o.deg : 0, rec.stripWhite);
-      const silhouette = makeSilhouette(prepared);
-      setAssets((prev) => prev.map((a) => (a.id === rec.id ? Object.assign({}, a, rec, { prepared, silhouette }) : a)));
-    };
-    img.src = rec.dataUrl;
-  };
-
-  const onFiles = (e) => {
-    const files = Array.from(e.target.files || []);
-    if (!files.length) return;
-    setBusy(true);
-    let remaining = files.length;
-    files.forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const id = __uid++;
-        const img = new Image();
-        img.onload = () => {
-          const prepared = prepareImage(img, 0, true);
-          const silhouette = makeSilhouette(prepared);
-          const unmapped = blueprintSkus.find((s) => !assets.some((a) => a.sku === s));
-          setAssets((prev) => prev.concat([{
-            id, sku: unmapped || ("EC-NEW-" + id),
-            name: file.name.replace(/\.[^.]+$/, ""),
-            dataUrl: reader.result,
-            real_width_in: 3.0, layer_class: "secondary", rotation_mode: "camera_facing",
-            orient: "none", stripWhite: true,
-            anchor: { x: 0.5, y: 0.5 },
-            prepared, silhouette,
-          }]));
-          remaining--; if (remaining <= 0) setBusy(false);
-        };
-        img.src = reader.result;
-      };
-      reader.readAsDataURL(file);
-    });
-    e.target.value = "";
-  };
-
-  const updateAsset = (id, patch, reprepare) => {
-    setAssets((prev) => {
-      const next = prev.map((a) => (a.id === id ? Object.assign({}, a, patch) : a));
-      if (reprepare) {
-        const rec = next.find((a) => a.id === id);
-        if (rec) setTimeout(() => rebuildAsset(rec), 0);
-      }
-      return next;
-    });
-  };
-  const removeAsset = (id) => setAssets((prev) => prev.filter((a) => a.id !== id));
-
-  const exportManifest = () => {
-    const out = {
-      version: "BRC-3.0",
-      exported: new Date().toISOString(),
-      assets: assets.map((a) => ({
-        sku: a.sku, name: a.name, real_width_in: a.real_width_in,
-        layer_class: a.layer_class, rotation_mode: a.rotation_mode,
-        orient: a.orient, strip_white: a.stripWhite, anchor_point: a.anchor,
-        image_dataurl: a.dataUrl,
-      })),
-    };
-    const blob = new Blob([JSON.stringify(out)], { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "evercrafted-asset-manifest.json";
-    a.click();
-    URL.revokeObjectURL(a.href);
-  };
+  /* ─── asset ingest + persistence ─── */
   const loadAssetRecord = (rec) => {
     const id = __uid++;
     const img = new Image();
@@ -812,6 +747,109 @@ function BRCApp() {
     img.src = rec.image_dataurl;
   };
 
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    idbGet("assets").then((list) => {
+      if (Array.isArray(list) && list.length) list.forEach(loadAssetRecord);
+    }).catch(() => {});
+    idbGet("history").then((h) => { if (Array.isArray(h)) setHistory(h); }).catch(() => {});
+    idbGet("customPrompt").then((p) => { if (typeof p === "string") setCustomPrompt(p); }).catch(() => {});
+    idbGet("presetKey").then((k) => { if (k && PROMPT_PRESETS[k]) setPresetKey(k); }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!restoredRef.current) return;
+    const t = setTimeout(() => {
+      const out = assets.map((a) => ({
+        sku: a.sku, name: a.name, real_width_in: a.real_width_in,
+        layer_class: a.layer_class, rotation_mode: a.rotation_mode,
+        orient: a.orient, strip_white: a.stripWhite, anchor_point: a.anchor,
+        image_dataurl: a.dataUrl,
+      }));
+      idbSet("assets", out).catch(() => {});
+    }, 800);
+    return () => clearTimeout(t);
+  }, [assets]);
+  useEffect(() => { if (restoredRef.current) idbSet("history", history).catch(() => {}); }, [history]);
+  useEffect(() => { if (restoredRef.current) idbSet("customPrompt", customPrompt).catch(() => {}); }, [customPrompt]);
+  useEffect(() => { if (restoredRef.current) idbSet("presetKey", presetKey).catch(() => {}); }, [presetKey]);
+
+  const onFiles = (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    setBusy(true);
+    let remaining = files.length;
+    files.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const id = __uid++;
+        const img = new Image();
+        img.onload = () => {
+          const prepared = prepareImage(img, 0, true);
+          const silhouette = makeSilhouette(prepared);
+          const unmapped = blueprintSkus.find((s) => !assets.some((a) => a.sku === s));
+          const slot = unmapped && PLACEHOLDERS[unmapped];
+          setAssets((prev) => prev.concat([{
+            id, sku: unmapped || ("EC-NEW-" + id),
+            name: file.name.replace(/\.[^.]+$/, ""),
+            dataUrl: reader.result,
+            real_width_in: slot ? slot.real_width_in : 3.0,
+            layer_class: slot ? slot.layer_class : "secondary",
+            rotation_mode: slot ? slot.rotation_mode : "camera_facing",
+            orient: "none", stripWhite: true,
+            anchor: { x: 0.5, y: 0.5 },
+            prepared, silhouette,
+          }]));
+          remaining--; if (remaining <= 0) setBusy(false);
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = "";
+  };
+
+  const rebuildAsset = (rec) => {
+    const img = new Image();
+    img.onload = () => {
+      const o = ORIENTS.find((x) => x.id === rec.orient);
+      const prepared = prepareImage(img, o ? o.deg : 0, rec.stripWhite);
+      const silhouette = makeSilhouette(prepared);
+      setAssets((prev) => prev.map((a) => (a.id === rec.id ? Object.assign({}, a, rec, { prepared, silhouette }) : a)));
+    };
+    img.src = rec.dataUrl;
+  };
+  const updateAsset = (id, patch, reprepare) => {
+    setAssets((prev) => {
+      const next = prev.map((a) => (a.id === id ? Object.assign({}, a, patch) : a));
+      if (reprepare) {
+        const rec = next.find((a) => a.id === id);
+        if (rec) setTimeout(() => rebuildAsset(rec), 0);
+      }
+      return next;
+    });
+  };
+  const removeAsset = (id) => setAssets((prev) => prev.filter((a) => a.id !== id));
+
+  const exportManifest = () => {
+    const out = {
+      version: "BRC-4.0", exported: new Date().toISOString(),
+      assets: assets.map((a) => ({
+        sku: a.sku, name: a.name, real_width_in: a.real_width_in,
+        layer_class: a.layer_class, rotation_mode: a.rotation_mode,
+        orient: a.orient, strip_white: a.stripWhite, anchor_point: a.anchor,
+        image_dataurl: a.dataUrl,
+      })),
+    };
+    const blob = new Blob([JSON.stringify(out)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "evercrafted-asset-manifest.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
   const importManifest = (e) => {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
@@ -826,30 +864,13 @@ function BRCApp() {
     e.target.value = "";
   };
 
-  /* restore the asset library on page load */
-  const restoredRef = useRef(false);
-  useEffect(() => {
-    if (restoredRef.current) return;
-    restoredRef.current = true;
-    idbGet("assets").then((list) => {
-      if (Array.isArray(list) && list.length) list.forEach(loadAssetRecord);
-    }).catch(() => {});
-  }, []);
-
-  /* autosave the library (debounced) whenever it changes */
-  useEffect(() => {
-    if (!restoredRef.current) return;
-    const t = setTimeout(() => {
-      const out = assets.map((a) => ({
-        sku: a.sku, name: a.name, real_width_in: a.real_width_in,
-        layer_class: a.layer_class, rotation_mode: a.rotation_mode,
-        orient: a.orient, strip_white: a.stripWhite, anchor_point: a.anchor,
-        image_dataurl: a.dataUrl,
-      }));
-      idbSet("assets", out).catch(() => {});
-    }, 800);
-    return () => clearTimeout(t);
-  }, [assets]);
+  const copyPrompt = (sku) => {
+    const text = stemPrompt(sku);
+    const done = () => { setCopiedSku(sku); setTimeout(() => setCopiedSku(null), 1800); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => window.prompt("Copy the prompt:", text));
+    } else window.prompt("Copy the prompt:", text);
+  };
 
   const applyJson = useCallback(() => {
     try {
@@ -863,103 +884,82 @@ function BRCApp() {
 
   const exportPNG = useCallback(() => {
     const off = document.createElement("canvas");
-    renderComposite(off, bp, {
-      layersOn, showOverlay: false, showShadows, jitter, globalScale, lightAngle, resolve, sizePx: 3000,
-      nesting, canopy: canopyPct, foliageDensity, outerFlare,
-    });
+    renderComposite(off, bp, Object.assign({}, renderOpts, { showOverlay: false, sizePx: 3000 }));
     const a = document.createElement("a");
     a.href = off.toDataURL("image/png");
     a.download = (bp.blueprint_id || "EC_WR") + "_seed" + seed + "_proof_3000.png";
     a.click();
   }, [bp, layersOn, showShadows, jitter, globalScale, lightAngle, resolve, seed, nesting, canopyPct, foliageDensity, outerFlare]);
 
+  /* ─── EDITORIAL — frozen preset + seed, fully logged ─── */
+  const activePromptText = presetKey === "custom" ? customPrompt : PROMPT_PRESETS[presetKey].text;
+
   const runEditorial = useCallback(async () => {
-    setEdBusy(true); setEdError(null); setEdResult(null);
+    if (presetKey === "custom" && !customPrompt.trim()) { setEdError("Custom prompt is empty."); return; }
+    setEdBusy(true); setEdError(null);
     try {
       const off = document.createElement("canvas");
-      const renderResult = renderComposite(off, bp, {
-        layersOn, showOverlay: false, showShadows, jitter, globalScale, lightAngle, resolve, sizePx: 1408,
-        nesting, canopy: canopyPct, foliageDensity, outerFlare,
-      });
+      const renderResult = renderComposite(off, bp, Object.assign({}, renderOpts, { showOverlay: false, sizePx: 1408 }));
       const proofDataUrl = off.toDataURL("image/jpeg", 0.92);
-      /* INVENTORY LOCK — count what is actually on the canvas and bind the
-         model to it, so nothing gets deleted, added, or species-swapped */
+      /* small thumb for the permanent history */
+      const th = document.createElement("canvas");
+      th.width = 280; th.height = 280;
+      th.getContext("2d").drawImage(off, 0, 0, 280, 280);
+      const proofThumb = th.toDataURL("image/jpeg", 0.8);
+
       const counts = renderResult.itemCounts || {};
-      const lock = Object.keys(counts).length
-        ? "INVENTORY LOCK \u2014 this wreath contains exactly: " +
-          Object.entries(counts).map(([n, c]) => c + "\u00d7 " + n).join(", ") +
-          ". Every one of these must appear in the output, unchanged in species and color. No other flowers or plants may be added. " +
-          "The greenery must keep its full visible volume, leaf density, and leaf shape \u2014 do not thin, sparse, miniaturize, or convert the foliage into a different greenery species. " +
-          "The base is a natural brown grapevine wreath \u2014 render it as woven woody grapevine branches, not wire. "
+      const lock = useLock && Object.keys(counts).length
+        ? "INVENTORY LOCK — this wreath contains exactly: " +
+          Object.entries(counts).map(([n, c]) => c + "× " + n).join(", ") + INVENTORY_LOCK_TAIL
         : "";
+
       const r = await fetch("/api/realism", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: proofDataUrl, prompt: lock + edPrompt, mode: "kontext" }),
+        body: JSON.stringify({ image: proofDataUrl, prompt: lock + activePromptText, seed: edSeed }),
       });
       const data = await r.json();
       if (!r.ok) throw new Error((data && data.error) || ("Proxy returned " + r.status));
       if (!data.output) throw new Error("Proxy returned no output image");
-      setEdResult({ url: data.output, proofDataUrl, lock });
+
+      const entry = {
+        url: data.output, proofThumb,
+        seed: edSeed, preset: presetKey,
+        presetLabel: PROMPT_PRESETS[presetKey].label,
+        ts: new Date().toISOString(),
+        proofSeed: seed, density: foliageDensity,
+      };
+      setCurrent(entry);
+      setHistory((prev) => [entry].concat(prev).slice(0, 18));
     } catch (err) {
       setEdError(err.message || "Editorial pass failed");
     } finally {
       setEdBusy(false);
     }
-  }, [edPrompt, bp, layersOn, showShadows, jitter, globalScale, lightAngle, resolve, nesting, canopyPct, foliageDensity, outerFlare]);
+  }, [bp, layersOn, showShadows, jitter, globalScale, lightAngle, resolve, nesting, canopyPct, foliageDensity, outerFlare, presetKey, customPrompt, useLock, edSeed, seed, activePromptText]);
 
-  /* BLEND BOOST — feed the Editorial result back through a second pass
-     focused purely on deepening the interweave */
-  const BOOST_PROMPT =
-    "Deepen the physical integration of this wreath photograph. STRICT PRESERVATION: same number of flowers and greenery, " +
-    "same species, same colors, same locations \u2014 do not simplify, remove, or replace anything. " +
-    "Only deepen what exists: arch existing leaves further over flower edges, sink blooms further into the foliage, " +
-    "strengthen insertion shadows and depth layering. Photorealistic, matte silk texture, soft daylight from upper left, " +
-    "clean white background.";
-
-  const runBoost = useCallback(async () => {
-    if (!edResult) return;
-    setEdBusy(true); setEdError(null);
-    try {
-      /* pull the Editorial result down and convert to a data URL */
-      const imgResp = await fetch(edResult.url);
-      const blob = await imgResp.blob();
-      const dataUrl = await new Promise((res, rej) => {
-        const fr = new FileReader();
-        fr.onload = () => res(fr.result);
-        fr.onerror = () => rej(new Error("Could not read Editorial image"));
-        fr.readAsDataURL(blob);
-      });
-      const r = await fetch("/api/realism", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: dataUrl, prompt: (edResult.lock || "") + BOOST_PROMPT, mode: "kontext" }),
-      });
-      const data = await r.json();
-      if (!r.ok) throw new Error((data && data.error) || ("Proxy returned " + r.status));
-      if (!data.output) throw new Error("Proxy returned no output image");
-      setEdResult({ url: data.output, proofDataUrl: edResult.proofDataUrl, lock: edResult.lock });
-    } catch (err) {
-      setEdError(err.message || "Blend boost failed");
-    } finally {
-      setEdBusy(false);
-    }
-  }, [edResult]);
+  const reuse = (h) => {
+    setPresetKey(PROMPT_PRESETS[h.preset] ? h.preset : "faithful");
+    setEdSeed(h.seed);
+    if (typeof h.proofSeed === "number") setSeed(h.proofSeed);
+    if (typeof h.density === "number") setFoliageDensity(h.density);
+    setCurrent(h);
+  };
 
   const mappedCount = blueprintSkus.filter((s) => assets.some((a) => a.sku === s && a.prepared)).length;
   const silenceRejects = stats.rejected.filter((r) => r.reason === "silence_arc").length;
-  const skuRejects = stats.rejected.filter((r) => r.reason === "unresolved_sku").length;
+  const fmtTime = (ts) => new Date(ts).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
   return (
     <div style={S.app}>
       <header style={S.header}>
         <div>
           <div style={S.brand}>Evercrafted</div>
-          <h1 style={S.title}>Blueprint-to-Render Compositor</h1>
+          <h1 style={S.title}>Wreath Render Studio</h1>
         </div>
         <div style={S.headerMeta}>
-          <span style={S.badge}>BRC-3.0 · Hosted</span>
-          <span style={S.badgeOutline}>Proof + Editorial</span>
+          <span style={S.badge}>BRC-4.0</span>
+          <span style={S.badgeOutline}>Seeded · Logged · Reproducible</span>
         </div>
       </header>
 
@@ -967,60 +967,44 @@ function BRCApp() {
         <div style={S.canvasWrap}>
           <canvas ref={canvasRef} style={S.canvas} />
           <div style={S.canvasFooter}>
-            <span>{bp.blueprint_id} · {bp.formula} · {bp.canvas ? bp.canvas.diameter_in : ""}″ form</span>
-            <span>{stats.pxPerIn.toFixed(1)} px/in · seed {seed} · {mappedCount}/{blueprintSkus.length} SKUs live</span>
+            <span>{bp.blueprint_id} · {bp.formula} · {bp.canvas ? bp.canvas.diameter_in : ""}″</span>
+            <span>seed {seed} · {mappedCount}/{blueprintSkus.length} real SKUs · {stats.count} placed · {silenceRejects} silence-enforced</span>
           </div>
         </div>
 
         <aside style={S.panel}>
           <div style={S.section}>
-            <div style={S.sectionLabel}>Seed</div>
+            <div style={S.sectionLabel}>Composition Seed</div>
             <div style={S.row}>
               <input type="number" value={seed}
                 onChange={(e) => setSeed(parseInt(e.target.value || "0", 10))} style={S.input} />
               <button onClick={() => setSeed(Math.floor(Math.random() * 99999))} style={S.btnGhost}>Reroll</button>
             </div>
+            <div style={S.hint}>Same seed + same settings = identical Proof. Always.</div>
           </div>
 
           <div style={S.section}>
-            <div style={S.sectionLabel}>Organic Variance — {Math.round(jitter * 100)}%</div>
-            <input type="range" min="0" max="1" step="0.05" value={jitter}
-              onChange={(e) => setJitter(parseFloat(e.target.value))} style={S.slider} />
-            <div style={S.sectionLabel}>True-Scale Multiplier — {globalScale.toFixed(2)}×</div>
-            <input type="range" min="0.8" max="1.25" step="0.01" value={globalScale}
-              onChange={(e) => setGlobalScale(parseFloat(e.target.value))} style={S.slider} />
-            <div style={S.sectionLabel}>Key Light — {lightAngle}°</div>
-            <input type="range" min="0" max="360" step="5" value={lightAngle}
-              onChange={(e) => setLightAngle(parseInt(e.target.value, 10))} style={S.slider} />
-          </div>
-
-          <div style={S.section}>
-            <div style={S.sectionLabel}>Nesting — built, not placed</div>
-            <label style={S.check}>
-              <input type="checkbox" checked={nesting} onChange={() => setNesting((v) => !v)} />
-              <span>Foliage collars under blooms</span>
-            </label>
-            <div style={S.sectionLabel}>Canopy Overlap — {Math.round(canopyPct * 100)}%</div>
-            <input type="range" min="0" max="0.5" step="0.05" value={canopyPct}
-              onChange={(e) => setCanopyPct(parseFloat(e.target.value))} style={S.slider} />
             <div style={S.sectionLabel}>Foliage Density — {Math.round(foliageDensity * 100)}%</div>
             <input type="range" min="0.3" max="1.6" step="0.05" value={foliageDensity}
               onChange={(e) => setFoliageDensity(parseFloat(e.target.value))} style={S.slider} />
             <div style={S.sectionLabel}>Outer Flare — {Math.round(outerFlare * 100)}%</div>
             <input type="range" min="0" max="0.6" step="0.05" value={outerFlare}
               onChange={(e) => setOuterFlare(parseFloat(e.target.value))} style={S.slider} />
-            <div style={S.hint}>Collars bed every bloom in greenery; canopy redraws a seeded share of foliage OVER flower edges so the Proof interlaces before the AI ever sees it.</div>
-          </div>
-
-          <div style={S.section}>
-            <div style={S.sectionLabel}>Z-Stack Layers</div>
-            {LAYER_ORDER.map((L) => (
-              <label key={L} style={S.check}>
-                <input type="checkbox" checked={layersOn[L]}
-                  onChange={() => setLayersOn((p) => Object.assign({}, p, { [L]: !p[L] }))} />
-                <span style={{ textTransform: "capitalize" }}>{L}</span>
-              </label>
-            ))}
+            <div style={S.sectionLabel}>Canopy Overlap — {Math.round(canopyPct * 100)}%</div>
+            <input type="range" min="0" max="0.5" step="0.05" value={canopyPct}
+              onChange={(e) => setCanopyPct(parseFloat(e.target.value))} style={S.slider} />
+            <div style={S.sectionLabel}>Organic Variance — {Math.round(jitter * 100)}%</div>
+            <input type="range" min="0" max="1" step="0.05" value={jitter}
+              onChange={(e) => setJitter(parseFloat(e.target.value))} style={S.slider} />
+            <div style={S.sectionLabel}>Scale — {globalScale.toFixed(2)}× · Light — {lightAngle}°</div>
+            <input type="range" min="0.8" max="1.25" step="0.01" value={globalScale}
+              onChange={(e) => setGlobalScale(parseFloat(e.target.value))} style={S.slider} />
+            <input type="range" min="0" max="360" step="5" value={lightAngle}
+              onChange={(e) => setLightAngle(parseInt(e.target.value, 10))} style={S.slider} />
+            <label style={S.check}>
+              <input type="checkbox" checked={nesting} onChange={() => setNesting((v) => !v)} />
+              <span>Foliage collars under blooms</span>
+            </label>
             <label style={S.check}>
               <input type="checkbox" checked={showShadows} onChange={() => setShowShadows((v) => !v)} />
               <span>Silhouette shadows</span>
@@ -1031,17 +1015,6 @@ function BRCApp() {
             </label>
           </div>
 
-          <div style={S.section}>
-            <div style={S.sectionLabel}>Engine Report</div>
-            <div style={S.stat}><span>Instances placed</span><b>{stats.count}</b></div>
-            <div style={S.stat}><span>Silence-arc enforced</span><b>{silenceRejects}</b></div>
-            <div style={S.stat}><span>Real assets live</span><b>{mappedCount} / {blueprintSkus.length}</b></div>
-            <div style={S.stat}>
-              <span>Unresolved SKUs</span>
-              <b style={{ color: skuRejects ? "#a8502e" : undefined }}>{skuRejects}</b>
-            </div>
-          </div>
-
           <button onClick={exportPNG} style={S.btnPrimary}>Export Proof PNG · 3000px</button>
           <button onClick={() => setShowJson((v) => !v)} style={S.btnGhostWide}>
             {showJson ? "Hide" : "Edit"} Blueprint JSON
@@ -1050,7 +1023,7 @@ function BRCApp() {
       </div>
 
       {showJson && (
-        <div style={S.jsonWrap}>
+        <div style={S.cardWrap}>
           <div style={S.sectionLabel}>Blueprint JSON — EC_WR_V2</div>
           <textarea value={jsonText} onChange={(e) => setJsonText(e.target.value)} spellCheck={false} style={S.textarea} />
           <div style={S.row}>
@@ -1060,73 +1033,105 @@ function BRCApp() {
         </div>
       )}
 
+      {/* ═══════ EDITORIAL ═══════ */}
       <div style={S.editorialWrap}>
-        <div style={{ marginBottom: 14 }}>
-          <div style={S.sectionLabel}>Editorial Mode — the only AI touchpoint</div>
-          <div style={S.hint}>
-            Connected automatically to this project's own /api/realism endpoint — same server, no configuration.
-            The pass may heal seams, unify lighting, and add photographic texture. It is instructed to move nothing. You are the QA gate.
-          </div>
+        <div style={S.sectionLabel}>Editorial Render — frozen presets · seeded · logged</div>
+        <div style={S.hint}>
+          The prompt is a preset you select — this app never modifies it. Same Proof + same preset + same render seed returns the same image.
+          Every render lands in the history below with its exact settings, permanently.
         </div>
-        <div style={S.editorialGrid}>
+        <div style={S.edGrid}>
           <div>
-            <label style={S.fieldLabel}>Realism instruction (preservation language locked in by default)
-              <textarea value={edPrompt} onChange={(e) => setEdPrompt(e.target.value)}
-                style={Object.assign({}, S.textarea, { height: 150, marginBottom: 0 })} spellCheck={false} />
+            <label style={S.fieldLabel}>Prompt preset
+              <select value={presetKey} onChange={(e) => setPresetKey(e.target.value)} style={S.select}>
+                {Object.entries(PROMPT_PRESETS).map(([k, p]) => <option key={k} value={k}>{p.label}</option>)}
+              </select>
             </label>
+            {presetKey === "custom" ? (
+              <textarea value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)}
+                placeholder="Write your own instruction. It saves automatically and is never altered."
+                style={Object.assign({}, S.textarea, { height: 130, marginTop: 8, marginBottom: 0 })} spellCheck={false} />
+            ) : (
+              <div style={S.frozen}>{PROMPT_PRESETS[presetKey].text}</div>
+            )}
+            <div style={Object.assign({}, S.row, { marginTop: 12 })}>
+              <label style={Object.assign({}, S.fieldLabel, { flex: "0 0 150px" })}>Render seed
+                <input type="number" value={edSeed}
+                  onChange={(e) => setEdSeed(parseInt(e.target.value || "0", 10))} style={S.input} />
+              </label>
+              <button onClick={() => setEdSeed(Math.floor(Math.random() * 999999))} style={S.btnGhost}>New seed</button>
+              <label style={Object.assign({}, S.check, { marginTop: 14 })}>
+                <input type="checkbox" checked={useLock} onChange={() => setUseLock((v) => !v)} />
+                <span>Inventory lock</span>
+              </label>
+            </div>
             <div style={Object.assign({}, S.row, { marginTop: 12 })}>
               <button onClick={runEditorial} disabled={edBusy} style={S.btnPrimary}>
-                {edBusy ? "Rendering Editorial…" : "Run Editorial Pass"}
+                {edBusy ? "Rendering…" : "Generate Editorial"}
               </button>
               {edError && <span style={S.error}>⚠ {edError}</span>}
             </div>
+            <div style={S.hint}>Variation = change the render seed and generate again. Each pull costs a few cents. Keep the winners; they're logged either way.</div>
           </div>
-          {edResult && (
+
+          {current && (
             <div style={S.compareWrap}>
               <div style={S.compareCol}>
-                <div style={S.compareLabel}>Proof — structural truth</div>
-                <img src={edResult.proofDataUrl} alt="Proof render" style={S.compareImg} />
+                <div style={S.compareLabel}>Proof</div>
+                <img src={current.proofThumb} alt="Proof" style={S.compareImg} />
               </div>
               <div style={S.compareCol}>
-                <div style={S.compareLabel}>Editorial — realism pass</div>
-                <img src={edResult.url} alt="Editorial render" style={S.compareImg} />
-                <div style={S.qaBox}>
-                  <div style={S.sectionLabel}>QA before accepting</div>
-                  <div style={S.hint}>
-                    Same stem count? Same species and colors? Silence arc still bare? Nothing added or moved?
-                    If anything drifted, reject — the Proof is always the source of truth.
-                  </div>
-                  <div style={Object.assign({}, S.row, { marginTop: 10 })}>
-                    <a href={edResult.url} target="_blank" rel="noreferrer" style={Object.assign({}, S.btnPrimary, { textDecoration: "none", display: "inline-block" })}>
-                      Accept · Open Full Size
-                    </a>
-                    <button onClick={runBoost} disabled={edBusy} style={S.btnGhost}>
-                      {edBusy ? "Boosting…" : "Blend Boost — weave deeper"}
-                    </button>
-                    <button onClick={() => setEdResult(null)} style={S.btnDanger}>Reject — keep Proof</button>
-                  </div>
-                </div>
+                <div style={S.compareLabel}>Editorial · seed {current.seed} · {current.presetLabel}</div>
+                <img src={current.url} alt="Editorial" style={S.compareImg} />
+                <a href={current.url} target="_blank" rel="noreferrer" style={Object.assign({}, S.btnPrimary, { textDecoration: "none", display: "inline-block", textAlign: "center" })}>
+                  Open Full Size
+                </a>
               </div>
             </div>
           )}
         </div>
       </div>
 
-      <div style={S.libraryWrap}>
+      {/* ═══════ RENDER HISTORY ═══════ */}
+      {history.length > 0 && (
+        <div style={S.cardWrap}>
+          <div style={S.sectionLabel}>Render History — nothing gets lost</div>
+          <div style={S.hint}>Every render with its exact preset, render seed, Proof seed, and density. "Reuse" restores all of them so any result can be regenerated.</div>
+          <div style={S.histGrid}>
+            {history.map((h, i) => (
+              <div key={h.ts + i} style={S.histCard}>
+                <img src={h.url} alt="render" style={S.histImg} />
+                <div style={S.histMeta}>
+                  <div>{fmtTime(h.ts)} · seed {h.seed}</div>
+                  <div style={{ color: "rgba(38,36,31,0.5)" }}>{(h.presetLabel || h.preset || "").split(" — ")[0]} · proof {h.proofSeed} · density {Math.round((h.density || 1) * 100)}%</div>
+                </div>
+                <div style={Object.assign({}, S.row, { padding: "0 10px 10px" })}>
+                  <a href={h.url} target="_blank" rel="noreferrer" style={S.histLink}>Open</a>
+                  <button onClick={() => reuse(h)} style={S.btnGhost}>Reuse</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ═══════ ASSET LIBRARY ═══════ */}
+      <div style={S.cardWrap}>
         <div style={S.libraryHeader}>
           <div>
             <div style={S.sectionLabel}>Asset Library — your real stems</div>
             <div style={S.hint}>
-              Upload cutout PNGs (white backgrounds are stripped automatically). Tag SKU, true width, layer, and anchor. Your library now saves itself in this browser and survives reloads \u2014 the manifest export is your backup and your transfer between devices.
+              Saves itself in this browser and survives reloads. White backgrounds strip automatically with edge cleanup.
+              Picking a SKU applies that slot's width, layer, and rotation — no guessing.
             </div>
           </div>
           <div style={S.row}>
             <button onClick={() => fileRef.current && fileRef.current.click()} style={S.btnPrimary}>
               {busy ? "Loading…" : "Upload Cutouts"}
             </button>
-            <button onClick={exportManifest} style={S.btnGhost} disabled={!assets.length}>Export Manifest</button>
-            <button onClick={() => manifestRef.current && manifestRef.current.click()} style={S.btnGhost}>Import Manifest</button>
             <button onClick={() => setShowKit((v) => !v)} style={S.btnGhost}>{showKit ? "Hide" : "Stem"} Prompt Kit</button>
+            <button onClick={exportManifest} style={S.btnGhost} disabled={!assets.length}>Export Manifest</button>
+            <button onClick={() => manifestRef.current && manifestRef.current.click()} style={S.btnGhost}>Import</button>
           </div>
           <input ref={fileRef} type="file" accept="image/png,image/webp,image/jpeg" multiple style={{ display: "none" }} onChange={onFiles} />
           <input ref={manifestRef} type="file" accept="application/json" style={{ display: "none" }} onChange={importManifest} />
@@ -1134,10 +1139,8 @@ function BRCApp() {
 
         {showKit && (
           <div style={S.kitWrap}>
-            <div style={S.sectionLabel}>Stem Prompt Kit — generate cutouts for every slot</div>
             <div style={S.hint}>
-              Paste each prompt into Midjourney, pick the cleanest result, upscale, and upload it here — the white background strips automatically.
-              Foliage prompts come out pre-oriented (base left, tips right) so they import tangent-ready with Orientation: As uploaded.
+              Paste each prompt into Midjourney, upscale the cleanest result, upload it here. Foliage prompts come out base-left / tips-right so they import tangent-ready.
             </div>
             {blueprintSkus.map((sku) => (
               <div key={sku} style={S.kitRow}>
@@ -1155,7 +1158,7 @@ function BRCApp() {
 
         {!assets.length && (
           <div style={S.empty}>
-            No real assets yet — rendering on procedural placeholders. Upload cutouts and assign them to blueprint SKUs ({blueprintSkus.join(" · ")}).
+            No real assets yet — rendering on placeholders. Upload cutouts and map them to slots ({blueprintSkus.join(" · ")}).
           </div>
         )}
 
@@ -1171,27 +1174,15 @@ function BRCApp() {
                     onChange={(e) => {
                       const v = e.target.value;
                       if (v === "__custom") return;
-                      /* inherit the slot's expected defaults — no guessing */
                       const slot = PLACEHOLDERS[v];
-                      if (slot) {
-                        updateAsset(a.id, {
-                          sku: v,
-                          real_width_in: slot.real_width_in,
-                          layer_class: slot.layer_class,
-                          rotation_mode: slot.rotation_mode,
-                        });
-                      } else {
-                        updateAsset(a.id, { sku: v });
-                      }
+                      if (slot) updateAsset(a.id, { sku: v, real_width_in: slot.real_width_in, layer_class: slot.layer_class, rotation_mode: slot.rotation_mode });
+                      else updateAsset(a.id, { sku: v });
                     }}
                     style={S.select}>
                     {blueprintSkus.map((s) => <option key={s} value={s}>{s}{PLACEHOLDERS[s] ? " — " + PLACEHOLDERS[s].name : ""}</option>)}
                     <option value="__custom">custom…</option>
                   </select>
                 </label>
-                {PLACEHOLDERS[a.sku] && (
-                  <div style={S.hint}>Slot defaults applied: {PLACEHOLDERS[a.sku].real_width_in}″ · {PLACEHOLDERS[a.sku].layer_class} · {PLACEHOLDERS[a.sku].rotation_mode.replace("_", " ")}. Adjust only if your stem differs.</div>
-                )}
                 {!blueprintSkus.includes(a.sku) && (
                   <label style={S.fieldLabel}>Custom SKU
                     <input value={a.sku} onChange={(e) => updateAsset(a.id, { sku: e.target.value })} style={S.input} />
@@ -1241,12 +1232,13 @@ function BRCApp() {
       </div>
 
       <footer style={S.footer}>
-        AI interprets · geometry places. The Proof render is permanently authoritative — Editorial output that adds, removes, or moves any element fails QA by definition. Keys live server-side only.
+        AI interprets · geometry places. The Proof is deterministic and authoritative. Prompts are frozen presets under your control. Every render is seeded and logged. Keys live server-side only.
       </footer>
     </div>
   );
 }
 
+/* ═══════════ styles ═══════════ */
 const S = {
   app: { minHeight: "100vh", background: "#F9F7F4", color: "#26241F", fontFamily: "'Inter', sans-serif", padding: "28px clamp(16px,4vw,56px) 48px" },
   header: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", borderBottom: "1px solid rgba(74,103,65,0.22)", paddingBottom: 18, marginBottom: 26, flexWrap: "wrap", gap: 12 },
@@ -1267,40 +1259,43 @@ const S = {
   select: { padding: "8px 11px", border: "1px solid rgba(74,103,65,0.3)", borderRadius: 4, fontSize: 13.5, fontFamily: "'Inter', sans-serif", background: "#FCFBF8", color: "#26241F", width: "100%", boxSizing: "border-box" },
   slider: { width: "100%", margin: "2px 0 14px" },
   check: { display: "flex", gap: 9, alignItems: "center", fontSize: 13.5, padding: "5px 0", cursor: "pointer" },
-  stat: { display: "flex", justifyContent: "space-between", fontSize: 13, padding: "5px 0", borderBottom: "1px dashed rgba(74,103,65,0.12)" },
   hint: { fontSize: 11.5, color: "rgba(38,36,31,0.5)", marginTop: 8, lineHeight: 1.5 },
   btnPrimary: { background: "#2E3F2A", color: "#F9F7F4", border: "none", borderRadius: 4, padding: "12px 18px", fontSize: 12.5, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600, cursor: "pointer", fontFamily: "'Inter', sans-serif" },
   btnGhost: { background: "transparent", color: "#4A6741", border: "1px solid rgba(74,103,65,0.4)", borderRadius: 4, padding: "9px 14px", fontSize: 12.5, cursor: "pointer", fontWeight: 500, fontFamily: "'Inter', sans-serif" },
   btnGhostWide: { background: "transparent", color: "#4A6741", border: "1px solid rgba(74,103,65,0.4)", borderRadius: 4, padding: "12px 18px", fontSize: 12.5, letterSpacing: "0.08em", textTransform: "uppercase", cursor: "pointer", fontWeight: 500, fontFamily: "'Inter', sans-serif" },
   btnDanger: { background: "transparent", color: "#a8502e", border: "1px solid rgba(168,80,46,0.4)", borderRadius: 4, padding: "9px 14px", fontSize: 12.5, cursor: "pointer", fontWeight: 500, fontFamily: "'Inter', sans-serif" },
-  jsonWrap: { marginTop: 28, background: "#FFFFFF", border: "1px solid rgba(74,103,65,0.14)", borderRadius: 6, padding: "16px 18px" },
-  textarea: { width: "100%", height: 320, fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, border: "1px solid rgba(74,103,65,0.25)", borderRadius: 4, padding: 14, background: "#FCFBF8", color: "#26241F", marginBottom: 12, resize: "vertical", boxSizing: "border-box" },
-  error: { color: "#a8502e", fontSize: 12.5 },
+  cardWrap: { marginTop: 28, background: "#FFFFFF", border: "1px solid rgba(74,103,65,0.14)", borderRadius: 6, padding: "18px 20px" },
   editorialWrap: { marginTop: 28, background: "#FFFFFF", border: "1px solid rgba(176,121,63,0.35)", borderRadius: 6, padding: "18px 20px" },
-  editorialGrid: { display: "flex", flexDirection: "column", gap: 18 },
+  edGrid: { display: "flex", flexDirection: "column", gap: 18, marginTop: 12 },
+  frozen: { fontFamily: "ui-monospace, Menlo, monospace", fontSize: 11.5, lineHeight: 1.55, color: "rgba(38,36,31,0.65)", background: "#FCFBF8", border: "1px solid rgba(74,103,65,0.15)", borderRadius: 4, padding: "10px 12px", marginTop: 8 },
   compareWrap: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 18 },
   compareCol: { display: "flex", flexDirection: "column", gap: 8 },
   compareLabel: { fontSize: 11, letterSpacing: "0.16em", textTransform: "uppercase", color: "rgba(38,36,31,0.6)", fontWeight: 600 },
   compareImg: { width: "100%", borderRadius: 4, border: "1px solid rgba(74,103,65,0.18)", background: "#FCFBF8" },
-  qaBox: { border: "1px dashed rgba(176,121,63,0.45)", borderRadius: 6, padding: "12px 14px", marginTop: 4 },
-  libraryWrap: { marginTop: 28, background: "#FFFFFF", border: "1px solid rgba(74,103,65,0.14)", borderRadius: 6, padding: "18px 20px" },
+  histGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))", gap: 14, marginTop: 12 },
+  histCard: { border: "1px solid rgba(74,103,65,0.16)", borderRadius: 6, overflow: "hidden", background: "#FCFBF8" },
+  histImg: { width: "100%", aspectRatio: "1/1", objectFit: "cover", display: "block" },
+  histMeta: { padding: "10px 12px", fontSize: 12, lineHeight: 1.5 },
+  histLink: { color: "#4A6741", fontSize: 12.5, fontWeight: 500, textDecoration: "none", border: "1px solid rgba(74,103,65,0.4)", borderRadius: 4, padding: "9px 14px" },
+  textarea: { width: "100%", height: 320, fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, border: "1px solid rgba(74,103,65,0.25)", borderRadius: 4, padding: 14, background: "#FCFBF8", color: "#26241F", marginBottom: 12, resize: "vertical", boxSizing: "border-box" },
+  error: { color: "#a8502e", fontSize: 12.5 },
   libraryHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, flexWrap: "wrap", marginBottom: 14 },
+  kitWrap: { border: "1px dashed rgba(74,103,65,0.35)", borderRadius: 6, padding: "14px 16px", marginBottom: 16, background: "#FCFBF8" },
+  kitRow: { borderTop: "1px solid rgba(74,103,65,0.12)", padding: "12px 0" },
+  kitHead: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" },
+  kitName: { fontSize: 13, fontWeight: 600, color: "#2E3F2A" },
+  kitPrompt: { fontFamily: "ui-monospace, Menlo, monospace", fontSize: 11.5, lineHeight: 1.55, color: "rgba(38,36,31,0.75)", background: "#FFFFFF", border: "1px solid rgba(74,103,65,0.15)", borderRadius: 4, padding: "10px 12px", userSelect: "all", wordBreak: "break-word" },
   empty: { padding: "26px 20px", textAlign: "center", fontSize: 13.5, color: "rgba(38,36,31,0.55)", border: "1.5px dashed rgba(74,103,65,0.3)", borderRadius: 6, lineHeight: 1.6 },
   assetGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 },
   assetCard: { border: "1px solid rgba(74,103,65,0.16)", borderRadius: 6, overflow: "hidden", background: "#FCFBF8" },
   assetThumbWrap: { height: 150, display: "flex", alignItems: "center", justifyContent: "center", background: "repeating-conic-gradient(#EFEDE6 0% 25%, #F8F6F1 0% 50%) 0 0 / 18px 18px", borderBottom: "1px solid rgba(74,103,65,0.12)" },
   assetThumb: { maxHeight: 140, maxWidth: "92%", objectFit: "contain" },
   assetFields: { padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8 },
-  fieldLabel: { fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "rgba(38,36,31,0.55)", display: "flex", flexDirection: "column", gap: 4, fontWeight: 500 },
-  kitWrap: { border: "1px dashed rgba(74,103,65,0.35)", borderRadius: 6, padding: "14px 16px", marginBottom: 16, background: "#FCFBF8" },
-  kitRow: { borderTop: "1px solid rgba(74,103,65,0.12)", padding: "12px 0" },
-  kitHead: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" },
-  kitName: { fontSize: 13, fontWeight: 600, color: "#2E3F2A" },
-  kitPrompt: { fontFamily: "ui-monospace, Menlo, monospace", fontSize: 11.5, lineHeight: 1.55, color: "rgba(38,36,31,0.75)", background: "#FFFFFF", border: "1px solid rgba(74,103,65,0.15)", borderRadius: 4, padding: "10px 12px", userSelect: "all", wordBreak: "break-word" },
+  fieldLabel: { fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "rgba(38,36,31,0.55)", display: "flex", flexDirection: "column", gap: 4, fontWeight: 500, flex: 1 },
   footer: { marginTop: 30, fontSize: 12, color: "rgba(38,36,31,0.5)", lineHeight: 1.6, borderTop: "1px solid rgba(74,103,65,0.16)", paddingTop: 16, maxWidth: 760 },
 };
 
-ReactDOM.createRoot(document.getElementById("root")).render(<BRCApp />);
+ReactDOM.createRoot(document.getElementById("root")).render(<Studio />);
 </script>
 </body>
 </html>
