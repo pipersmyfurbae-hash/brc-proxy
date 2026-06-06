@@ -1,0 +1,991 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Evercrafted — Blueprint-to-Render Compositor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+  html,body{margin:0;padding:0;background:#F9F7F4;}
+  input[type=range]{accent-color:#4A6741;}
+  input[type=checkbox]{accent-color:#4A6741;}
+  ::selection{background:rgba(74,103,65,.22);}
+  button:disabled{opacity:.45;cursor:default;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="env,react">
+/* ════════════════════════════════════════════════════════════════════
+   EVERCRAFTED — BLUEPRINT-TO-RENDER COMPOSITOR · BRC-3.0 · HOSTED
+   This file lives at the ROOT of the brc-proxy Vercel project, next to
+   the /api folder. Served from the same domain as api/realism.js, the
+   Editorial pass is same-origin — no sandbox, no CORS, no setup.
+   ════════════════════════════════════════════════════════════════════ */
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rrange = (rng, a, b) => a + rng() * (b - a);
+const D2R = Math.PI / 180;
+const normDeg = (d) => ((d % 360) + 360) % 360;
+function inArc(angle, from, to) {
+  const a = normDeg(angle), f = normDeg(from), t = normDeg(to);
+  return f <= t ? a >= f && a <= t : a >= f || a <= t;
+}
+function polarToXY(cx, cy, angleDeg, radiusPx) {
+  return { x: cx + radiusPx * Math.cos(angleDeg * D2R), y: cy - radiusPx * Math.sin(angleDeg * D2R) };
+}
+
+/* ════════ procedural placeholders ════════ */
+function drawHydrangea(ctx, rng, size) {
+  const R = size / 2;
+  for (let i = 0; i < 54; i++) {
+    const rr = Math.sqrt(rng()) * R * 0.92, aa = rng() * Math.PI * 2;
+    const fx = Math.cos(aa) * rr, fy = Math.sin(aa) * rr * 0.94;
+    const fr = R * rrange(rng, 0.13, 0.19);
+    const mix = rrange(rng, 0, 1) * 0.5 + (rr / R) * 0.5;
+    const c = [205 - mix * 24, 218 - mix * 20, 236 - mix * 12];
+    ctx.save(); ctx.translate(fx, fy); ctx.rotate(rng() * Math.PI);
+    for (let p = 0; p < 4; p++) {
+      ctx.rotate(Math.PI / 2);
+      const g = ctx.createRadialGradient(0, -fr * 0.55, 0, 0, -fr * 0.55, fr * 0.8);
+      g.addColorStop(0, "rgb(" + (c[0] + 18) + "," + (c[1] + 14) + "," + (c[2] + 10) + ")");
+      g.addColorStop(1, "rgb(" + (c[0] - 14) + "," + (c[1] - 10) + "," + (c[2] - 4) + ")");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.ellipse(0, -fr * 0.55, fr * 0.46, fr * 0.62, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = "rgba(122,144,178,0.9)";
+    ctx.beginPath(); ctx.arc(0, 0, fr * 0.13, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+}
+function drawRanunculus(ctx, rng, size) {
+  const R = size / 2;
+  for (let L = 8; L >= 1; L--) {
+    const lr = R * (L / 8), petals = 6 + L * 2, tone = 1 - L / 8;
+    const base = [243 - tone * 6, 238 - tone * 4, 226 + tone * 14];
+    const rot = rng() * Math.PI * 2;
+    for (let p = 0; p < petals; p++) {
+      const pa = rot + (p / petals) * Math.PI * 2;
+      ctx.save();
+      ctx.translate(Math.cos(pa) * lr * 0.55, Math.sin(pa) * lr * 0.55);
+      ctx.rotate(pa + Math.PI / 2);
+      const g = ctx.createLinearGradient(0, -lr * 0.5, 0, lr * 0.3);
+      g.addColorStop(0, "rgb(" + base[0] + "," + base[1] + "," + base[2] + ")");
+      g.addColorStop(1, "rgba(" + (base[0] - 26) + "," + (base[1] - 26) + "," + (base[2] - 28) + ",0.95)");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.ellipse(0, 0, lr * 0.42, lr * 0.55, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "rgba(170,158,134,0.25)"; ctx.lineWidth = size * 0.006; ctx.stroke();
+      ctx.restore();
+    }
+  }
+  ctx.fillStyle = "#cfd3b4"; ctx.beginPath(); ctx.arc(0, 0, R * 0.07, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#9aa36f"; ctx.beginPath(); ctx.arc(0, 0, R * 0.035, 0, Math.PI * 2); ctx.fill();
+}
+function drawLisianthus(ctx, rng, size) {
+  const R = size / 2, rot = rng() * Math.PI * 2;
+  for (let p = 0; p < 6; p++) {
+    ctx.save(); ctx.rotate(rot + (p / 6) * Math.PI * 2 + rrange(rng, -0.1, 0.1));
+    const g = ctx.createLinearGradient(0, 0, R, 0);
+    g.addColorStop(0, "#f8f5ee"); g.addColorStop(0.7, "#f2ecdf"); g.addColorStop(1, "#e6dcc9");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(R * 0.08, 0);
+    ctx.bezierCurveTo(R * 0.35, -R * 0.5, R * 0.95, -R * 0.42, R * 0.98, -R * 0.04);
+    ctx.bezierCurveTo(R * 1.0, R * 0.3, R * 0.5, R * 0.5, R * 0.08, R * 0.12);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = "rgba(180,168,140,0.3)"; ctx.lineWidth = size * 0.007; ctx.stroke();
+    ctx.restore();
+  }
+  for (let s = 0; s < 7; s++) {
+    const sa = rng() * Math.PI * 2, sr = rng() * R * 0.12;
+    ctx.fillStyle = s % 2 ? "#d6cf9a" : "#b8bd86";
+    ctx.beginPath(); ctx.arc(Math.cos(sa) * sr, Math.sin(sa) * sr, R * 0.045, 0, Math.PI * 2); ctx.fill();
+  }
+}
+function drawWaxflower(ctx, rng, size) {
+  const R = size / 2;
+  for (let b = 0; b < 6; b++) {
+    const ba = rng() * Math.PI * 2, br = rng() * R * 0.8;
+    const bx = Math.cos(ba) * br, by = Math.sin(ba) * br;
+    ctx.strokeStyle = "rgba(110,122,92,0.8)"; ctx.lineWidth = size * 0.018;
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(bx, by); ctx.stroke();
+    const fr = R * rrange(rng, 0.18, 0.24);
+    for (let p = 0; p < 5; p++) {
+      const pa = (p / 5) * Math.PI * 2 + rng();
+      ctx.fillStyle = "#faf8f2";
+      ctx.beginPath();
+      ctx.ellipse(bx + Math.cos(pa) * fr * 0.5, by + Math.sin(pa) * fr * 0.5, fr * 0.34, fr * 0.42, pa, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = "#c8b98f"; ctx.beginPath(); ctx.arc(bx, by, fr * 0.16, 0, Math.PI * 2); ctx.fill();
+  }
+}
+function drawFoliageSprig(ctx, rng, size) {
+  const len = size, bend = rrange(rng, -0.25, 0.25);
+  ctx.strokeStyle = "#56603f"; ctx.lineWidth = size * 0.016;
+  ctx.beginPath(); ctx.moveTo(0, 0);
+  ctx.quadraticCurveTo(len * 0.5, len * bend, len, len * bend * 1.6); ctx.stroke();
+  for (let i = 1; i <= 9; i++) {
+    const t = i / 10, sx = len * t;
+    const sy = len * bend * (2 * t * (1 - t)) * 1.6 + len * bend * 1.6 * t * t;
+    const side = i % 2 ? 1 : -1;
+    const la = bend * 1.2 + side * rrange(rng, 0.7, 1.05);
+    const ll = size * rrange(rng, 0.16, 0.24) * (1 - t * 0.35);
+    ctx.save(); ctx.translate(sx, sy); ctx.rotate(la);
+    const g = ctx.createLinearGradient(0, 0, ll, 0);
+    g.addColorStop(0, "#4A6741"); g.addColorStop(1, "#7a9468");
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.ellipse(ll * 0.5, 0, ll * 0.5, ll * 0.21, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "rgba(235,240,228,0.35)"; ctx.lineWidth = size * 0.006;
+    ctx.beginPath(); ctx.moveTo(ll * 0.08, 0); ctx.lineTo(ll * 0.92, 0); ctx.stroke();
+    ctx.restore();
+  }
+}
+function drawEucalyptus(ctx, rng, size) {
+  const len = size, bend = rrange(rng, -0.2, 0.2);
+  ctx.strokeStyle = "#7d8a72"; ctx.lineWidth = size * 0.013;
+  ctx.beginPath(); ctx.moveTo(0, 0);
+  ctx.quadraticCurveTo(len * 0.5, len * bend, len, len * bend * 1.5); ctx.stroke();
+  for (let i = 1; i <= 8; i++) {
+    const t = i / 9, sx = len * t;
+    const sy = len * bend * (2 * t * (1 - t)) * 1.6 + len * bend * 1.5 * t * t;
+    const side = i % 2 ? 1 : -1;
+    const cr = size * rrange(rng, 0.07, 0.105) * (1 - t * 0.25);
+    const cx2 = sx + side * cr * 1.1 * Math.abs(Math.sin(t * 4 + bend));
+    const cy2 = sy + side * cr * 1.3;
+    const g = ctx.createRadialGradient(cx2 - cr * 0.3, cy2 - cr * 0.3, 0, cx2, cy2, cr);
+    g.addColorStop(0, "#b9c9b4"); g.addColorStop(1, "#94aa92");
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(cx2, cy2, cr, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "rgba(120,138,118,0.5)"; ctx.lineWidth = size * 0.004; ctx.stroke();
+  }
+}
+
+const PLACEHOLDERS = {
+  "PH-HYD-BLUE":  { name: "Powder Blue Hydrangea", layer_class: "focal",     real_width_in: 4.5, rotation_mode: "camera_facing", draw: drawHydrangea },
+  "PH-RAN-WHITE": { name: "White Ranunculus",      layer_class: "secondary", real_width_in: 2.4, rotation_mode: "camera_facing", draw: drawRanunculus },
+  "PH-LIS-IVORY": { name: "Pale Lisianthus",       layer_class: "secondary", real_width_in: 2.8, rotation_mode: "camera_facing", draw: drawLisianthus },
+  "PH-WAX-WHITE": { name: "White Wax Flower",      layer_class: "filler",    real_width_in: 1.6, rotation_mode: "camera_facing", draw: drawWaxflower },
+  "PH-FOL-SAGE":  { name: "Sage Foliage Sprig",    layer_class: "foliage",   real_width_in: 7.5, rotation_mode: "tangent",       draw: drawFoliageSprig },
+  "PH-FOL-EUC":   { name: "Silver Eucalyptus",     layer_class: "foliage",   real_width_in: 6.5, rotation_mode: "tangent",       draw: drawEucalyptus },
+};
+const LAYER_ORDER = ["base", "foliage", "filler", "secondary", "focal"];
+const ORIENTS = [
+  { id: "none", label: "As uploaded", deg: 0 },
+  { id: "cw90", label: "Rotate 90° CW", deg: 90 },
+  { id: "r180", label: "Rotate 180°", deg: 180 },
+  { id: "ccw90", label: "Rotate 90° CCW", deg: 270 },
+];
+
+function drawGrapevine(ctx, cx, cy, rInner, rOuter, seed) {
+  const rng = mulberry32(seed * 7919 + 13);
+  const mid = (rInner + rOuter) / 2, band = (rOuter - rInner) / 2;
+  const browns = ["#8b6f4e", "#6e563c", "#a08660", "#7c6244", "#94795a"];
+  for (let i = 0; i < 150; i++) {
+    const r = mid + rrange(rng, -band, band) * rrange(rng, 0.4, 1);
+    const start = rng() * 360, span = rrange(rng, 35, 150);
+    const wob = rrange(rng, -band * 0.35, band * 0.35);
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(rng() * 0.06 - 0.03);
+    ctx.strokeStyle = browns[Math.floor(rng() * browns.length)];
+    ctx.globalAlpha = rrange(rng, 0.22, 0.6);
+    ctx.lineWidth = rrange(rng, 1.4, 3.6);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, r + wob, r - wob, 0, -start * D2R, -(start + span) * D2R, true);
+    ctx.stroke(); ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+}
+
+const SAMPLE_BLUEPRINT = {
+  blueprint_id: "EC_WR_V2_4217",
+  formula: "Crescent",
+  seed: 42,
+  emotional_tags: ["airy", "calm", "fresh"],
+  canvas: { type: "polar", diameter_in: 24 },
+  silence_arcs: [{ from_deg: 82, to_deg: 168 }],
+  foliage_sweeps: [
+    { sweep_id: "F1", item_id: "PH-FOL-SAGE", arc_from: 188, arc_to: 425, step_deg: 14, radius_norm: 0.8, flow: "cw" },
+    { sweep_id: "F2", item_id: "PH-FOL-EUC", arc_from: 215, arc_to: 400, step_deg: 22, radius_norm: 0.76, flow: "cw" },
+  ],
+  clusters: [
+    { cluster_id: "C1", type: "focal",     angle_deg: 305, radius_norm: 0.78, stems: [{ item_id: "PH-HYD-BLUE", qty: 1 }] },
+    { cluster_id: "C2", type: "secondary", angle_deg: 332, radius_norm: 0.80, stems: [{ item_id: "PH-RAN-WHITE", qty: 3 }] },
+    { cluster_id: "C3", type: "secondary", angle_deg: 276, radius_norm: 0.80, stems: [{ item_id: "PH-LIS-IVORY", qty: 2 }] },
+    { cluster_id: "C4", type: "secondary", angle_deg: 244, radius_norm: 0.78, stems: [{ item_id: "PH-RAN-WHITE", qty: 2 }] },
+    { cluster_id: "C5", type: "accent",    angle_deg: 355, radius_norm: 0.82, stems: [{ item_id: "PH-LIS-IVORY", qty: 1 }] },
+    { cluster_id: "C6", type: "filler",    angle_deg: 318, radius_norm: 0.84, stems: [{ item_id: "PH-WAX-WHITE", qty: 3 }] },
+    { cluster_id: "C7", type: "filler",    angle_deg: 222, radius_norm: 0.80, stems: [{ item_id: "PH-WAX-WHITE", qty: 2 }] },
+    { cluster_id: "C8", type: "filler",    angle_deg: 18,  radius_norm: 0.80, stems: [{ item_id: "PH-WAX-WHITE", qty: 2 }] },
+  ],
+};
+
+const DEFAULT_ED_PROMPT =
+  "Transform this faux botanical wreath composite into a photorealistic premium product photograph. " +
+  "CRITICAL: keep every flower, stem, and leaf in its exact position — do not add, remove, move, or resize any element. " +
+  "Preserve the exact species, bloom colors, and the intentionally bare grapevine arc at the top. " +
+  "Unify the lighting into soft natural daylight from the upper left, blend each stem insertion naturally into the grapevine base, " +
+  "add realistic soft shadows, believable depth, and matte silk petal texture. " +
+  "Premium e-commerce editorial photography, clean white background, no plastic shine, no added decorations.";
+
+function prepareImage(img, orientDeg, stripWhite) {
+  const rot = orientDeg % 360;
+  const swap = rot === 90 || rot === 270;
+  const w = swap ? img.naturalHeight : img.naturalWidth;
+  const h = swap ? img.naturalWidth : img.naturalHeight;
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext("2d");
+  ctx.save();
+  ctx.translate(w / 2, h / 2);
+  ctx.rotate(rot * D2R);
+  ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+  ctx.restore();
+  if (stripWhite) {
+    const id = ctx.getImageData(0, 0, w, h);
+    const d = id.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const lum = Math.min(d[i], d[i + 1], d[i + 2]);
+      if (lum > 248) d[i + 3] = 0;
+      else if (lum > 232) d[i + 3] = Math.min(d[i + 3], Math.round(((248 - lum) / 16) * 255));
+    }
+    ctx.putImageData(id, 0, 0);
+  }
+  return cv;
+}
+function makeSilhouette(sourceCanvas) {
+  const cv = document.createElement("canvas");
+  cv.width = sourceCanvas.width; cv.height = sourceCanvas.height;
+  const ctx = cv.getContext("2d");
+  ctx.drawImage(sourceCanvas, 0, 0);
+  ctx.globalCompositeOperation = "source-in";
+  ctx.fillStyle = "rgb(48,42,32)";
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  return cv;
+}
+function makeProceduralSilhouette(ph) {
+  const cam = ph.rotation_mode === "camera_facing";
+  const cv = document.createElement("canvas");
+  cv.width = cam ? 360 : 420; cv.height = cam ? 360 : 260;
+  const ctx = cv.getContext("2d");
+  ctx.save();
+  if (cam) ctx.translate(180, 180); else ctx.translate(30, 130);
+  ph.draw(ctx, mulberry32(777), 320);
+  ctx.restore();
+  ctx.globalCompositeOperation = "source-in";
+  ctx.fillStyle = "rgb(48,42,32)";
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  return cv;
+}
+
+function buildInstances(bp, opts) {
+  const { canvasPx, jitter, globalScale, resolve } = opts;
+  const cx = canvasPx / 2, cy = canvasPx / 2;
+  const fieldIn = bp.canvas.diameter_in + 5;
+  const pxPerIn = canvasPx / fieldIn;
+  const wreathRadiusPx = (bp.canvas.diameter_in / 2) * pxPerIn;
+  const silence = bp.silence_arcs || [];
+  const instances = [], rejected = [];
+  let idx = 0;
+  const inSilence = (a) => silence.some((s) => inArc(a, s.from_deg, s.to_deg));
+
+  (bp.foliage_sweeps || []).forEach((sw) => {
+    const res = resolve(sw.item_id);
+    if (!res) { rejected.push({ reason: "unresolved_sku", id: sw.item_id }); return; }
+    for (let a = sw.arc_from; a <= sw.arc_to; a += sw.step_deg) {
+      const rng = mulberry32(bp.seed * 9973 + idx * 271 + 7);
+      const ang = normDeg(a + rrange(rng, -1, 1) * sw.step_deg * 0.35 * jitter);
+      if (inSilence(ang)) { rejected.push({ reason: "silence_arc", id: sw.sweep_id }); idx++; continue; }
+      const rad = sw.radius_norm + rrange(rng, -0.045, 0.045) * jitter;
+      const pos = polarToXY(cx, cy, ang, rad * wreathRadiusPx);
+      const tangent = -(ang * D2R) + (sw.flow === "cw" ? Math.PI / 2 : -Math.PI / 2);
+      instances.push({
+        idx, item_id: sw.item_id, res, x: pos.x, y: pos.y,
+        rotation: tangent + rrange(rng, -0.3, 0.3) * jitter,
+        sizePx: res.real_width_in * pxPerIn * globalScale * rrange(rng, 0.85, 1.12),
+        mirror: rng() > 0.5, layer: res.layer_class,
+        seedLocal: bp.seed * 9973 + idx * 271,
+      });
+      idx++;
+    }
+  });
+
+  (bp.clusters || []).forEach((cl) => {
+    cl.stems.forEach((stem) => {
+      const res = resolve(stem.item_id);
+      if (!res) { rejected.push({ reason: "unresolved_sku", id: stem.item_id }); return; }
+      for (let q = 0; q < stem.qty; q++) {
+        const rng = mulberry32(bp.seed * 9973 + idx * 271 + 7);
+        const spread = stem.qty > 1 ? (q - (stem.qty - 1) / 2) * rrange(rng, 8, 13) : 0;
+        const ang = normDeg(cl.angle_deg + spread + rrange(rng, -3, 3) * jitter);
+        if (inSilence(ang)) { rejected.push({ reason: "silence_arc", id: cl.cluster_id }); idx++; continue; }
+        const rad = cl.radius_norm + rrange(rng, -0.05, 0.05) * jitter;
+        const pos = polarToXY(cx, cy, ang, rad * wreathRadiusPx);
+        instances.push({
+          idx, item_id: stem.item_id, res, x: pos.x, y: pos.y,
+          rotation: res.rotation_mode === "camera_facing" ? rrange(rng, -0.26, 0.26) : -(ang * D2R) + Math.PI / 2,
+          sizePx: res.real_width_in * pxPerIn * globalScale * rrange(rng, 0.92, 1.08),
+          mirror: rng() > 0.5 && res.rotation_mode === "camera_facing",
+          layer: res.layer_class,
+          seedLocal: bp.seed * 9973 + idx * 271,
+        });
+        idx++;
+      }
+    });
+  });
+
+  instances.sort((a, b) => LAYER_ORDER.indexOf(a.layer) - LAYER_ORDER.indexOf(b.layer) || a.idx - b.idx);
+  return { instances, rejected, pxPerIn, wreathRadiusPx, cx, cy };
+}
+
+function drawInstance(ctx, inst, mode) {
+  const { res } = inst;
+  if (res.kind === "image") {
+    const src = mode === "sil" ? res.silhouette : res.prepared;
+    if (!src) return;
+    const W = inst.sizePx;
+    const H = W * (res.prepared.height / res.prepared.width);
+    ctx.drawImage(src, -res.anchor.x * W, -res.anchor.y * H, W, H);
+  } else {
+    if (mode === "sil") {
+      const sil = res.silhouette;
+      const cam = res.rotation_mode === "camera_facing";
+      const sf = inst.sizePx / 320;
+      if (cam) ctx.drawImage(sil, -180 * sf, -180 * sf, 360 * sf, 360 * sf);
+      else ctx.drawImage(sil, -30 * sf, -130 * sf, 420 * sf, 260 * sf);
+    } else {
+      res.draw(ctx, mulberry32(inst.seedLocal + 3), inst.sizePx);
+    }
+  }
+}
+
+function renderComposite(canvas, bp, opts) {
+  const { layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve, sizePx } = opts;
+  const SZ = sizePx || 1400;
+  canvas.width = SZ; canvas.height = SZ;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#FCFBF8";
+  ctx.fillRect(0, 0, SZ, SZ);
+
+  const built = buildInstances(bp, { canvasPx: SZ, jitter, globalScale, resolve });
+  const { instances, rejected, pxPerIn, wreathRadiusPx, cx, cy } = built;
+
+  if (layersOn.base) drawGrapevine(ctx, cx, cy, wreathRadiusPx * 0.62, wreathRadiusPx * 0.96, bp.seed);
+
+  const rad = lightAngle * D2R;
+  const shx = -Math.cos(rad), shy = Math.sin(rad);
+
+  instances.forEach((inst) => {
+    if (!layersOn[inst.layer]) return;
+    if (showShadows) {
+      ctx.save();
+      ctx.translate(inst.x + shx * inst.sizePx * 0.09, inst.y + shy * inst.sizePx * 0.09);
+      ctx.rotate(inst.rotation);
+      if (inst.mirror) ctx.scale(-1, 1);
+      ctx.filter = "blur(" + Math.max(4, SZ * 0.006) + "px)";
+      ctx.globalAlpha = 0.18;
+      drawInstance(ctx, inst, "sil");
+      ctx.restore();
+      ctx.save();
+      ctx.translate(inst.x + shx * inst.sizePx * 0.018, inst.y + shy * inst.sizePx * 0.018);
+      ctx.rotate(inst.rotation);
+      if (inst.mirror) ctx.scale(-1, 1);
+      ctx.filter = "blur(" + Math.max(2, SZ * 0.0024) + "px)";
+      ctx.globalAlpha = 0.13;
+      drawInstance(ctx, inst, "sil");
+      ctx.restore();
+      ctx.filter = "none"; ctx.globalAlpha = 1;
+    }
+    ctx.save();
+    ctx.translate(inst.x, inst.y);
+    ctx.rotate(inst.rotation);
+    if (inst.mirror) ctx.scale(-1, 1);
+    drawInstance(ctx, inst, "asset");
+    ctx.restore();
+  });
+
+  if (showOverlay) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(74,103,65,0.30)";
+    ctx.setLineDash([5, 7]); ctx.lineWidth = SZ * 0.0009 + 0.6;
+    [0.4, 0.62, 0.8, 0.96].forEach((r) => {
+      ctx.beginPath(); ctx.arc(cx, cy, wreathRadiusPx * r, 0, Math.PI * 2); ctx.stroke();
+    });
+    for (let a = 0; a < 360; a += 30) {
+      const p1 = polarToXY(cx, cy, a, wreathRadiusPx * 0.3);
+      const p2 = polarToXY(cx, cy, a, wreathRadiusPx * 1.02);
+      ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    (bp.silence_arcs || []).forEach((s) => {
+      ctx.fillStyle = "rgba(176,121,63,0.10)";
+      ctx.beginPath(); ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, wreathRadiusPx * 1.02, -s.from_deg * D2R, -s.to_deg * D2R, true);
+      ctx.closePath(); ctx.fill();
+    });
+    (bp.clusters || []).forEach((cl) => {
+      const p = polarToXY(cx, cy, cl.angle_deg, cl.radius_norm * wreathRadiusPx);
+      ctx.strokeStyle = "rgba(46,63,42,0.85)"; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 9, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = "rgba(46,63,42,0.9)";
+      ctx.font = "600 " + SZ * 0.0128 + "px Georgia, serif";
+      ctx.fillText(cl.cluster_id + " · " + cl.angle_deg + "°", p.x + 14, p.y - 10);
+    });
+    ctx.restore();
+  }
+  return { count: instances.length, rejected, pxPerIn };
+}
+
+function AnchorPicker({ asset, onSet }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const cv = ref.current;
+    if (!cv || !asset.prepared) return;
+    const sc = Math.min(1, 240 / asset.prepared.width);
+    cv.width = asset.prepared.width * sc;
+    cv.height = asset.prepared.height * sc;
+    const ctx = cv.getContext("2d");
+    ctx.fillStyle = "#EFEDE6";
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(asset.prepared, 0, 0, cv.width, cv.height);
+    const ax = asset.anchor.x * cv.width, ay = asset.anchor.y * cv.height;
+    ctx.strokeStyle = "#B0793F"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(ax, ay, 8, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(ax - 13, ay); ctx.lineTo(ax + 13, ay);
+    ctx.moveTo(ax, ay - 13); ctx.lineTo(ax, ay + 13);
+    ctx.stroke();
+  }, [asset]);
+  const click = (e) => {
+    const rect = ref.current.getBoundingClientRect();
+    onSet({
+      x: Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height)),
+    });
+  };
+  return (
+    <div>
+      <canvas ref={ref} onClick={click} style={{ cursor: "crosshair", borderRadius: 4, display: "block", maxWidth: "100%" }} />
+      <div style={S.hint}>Click the stem insertion point — it becomes the rotation origin.</div>
+    </div>
+  );
+}
+
+let __uid = 1;
+function BRCApp() {
+  const canvasRef = useRef(null);
+  const fileRef = useRef(null);
+  const manifestRef = useRef(null);
+
+  const [seed, setSeed] = useState(42);
+  const [jitter, setJitter] = useState(0.7);
+  const [globalScale, setGlobalScale] = useState(1.0);
+  const [lightAngle, setLightAngle] = useState(135);
+  const [showOverlay, setShowOverlay] = useState(false);
+  const [showShadows, setShowShadows] = useState(true);
+  const [layersOn, setLayersOn] = useState({ base: true, foliage: true, filler: true, secondary: true, focal: true });
+  const [jsonText, setJsonText] = useState(JSON.stringify(SAMPLE_BLUEPRINT, null, 2));
+  const [blueprint, setBlueprint] = useState(SAMPLE_BLUEPRINT);
+  const [jsonError, setJsonError] = useState(null);
+  const [stats, setStats] = useState({ count: 0, rejected: [], pxPerIn: 0 });
+  const [showJson, setShowJson] = useState(false);
+  const [assets, setAssets] = useState([]);
+  const [openAsset, setOpenAsset] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const [edPrompt, setEdPrompt] = useState(DEFAULT_ED_PROMPT);
+  const [edBusy, setEdBusy] = useState(false);
+  const [edError, setEdError] = useState(null);
+  const [edResult, setEdResult] = useState(null);
+
+  const bp = useMemo(() => Object.assign({}, blueprint, { seed }), [blueprint, seed]);
+
+  const blueprintSkus = useMemo(() => {
+    const s = new Set();
+    (bp.foliage_sweeps || []).forEach((f) => s.add(f.item_id));
+    (bp.clusters || []).forEach((c) => c.stems.forEach((st) => s.add(st.item_id)));
+    return Array.from(s);
+  }, [bp]);
+
+  const phSil = useMemo(() => {
+    const m = {};
+    Object.entries(PLACEHOLDERS).forEach(([k, ph]) => { m[k] = makeProceduralSilhouette(ph); });
+    return m;
+  }, []);
+
+  const resolve = useCallback((sku) => {
+    const up = assets.find((a) => a.sku === sku && a.prepared);
+    if (up) {
+      return {
+        kind: "image", prepared: up.prepared, silhouette: up.silhouette,
+        anchor: up.anchor, real_width_in: up.real_width_in,
+        layer_class: up.layer_class, rotation_mode: up.rotation_mode,
+      };
+    }
+    const ph = PLACEHOLDERS[sku];
+    if (ph) return Object.assign({ kind: "proc", silhouette: phSil[sku] }, ph);
+    return null;
+  }, [assets, phSil]);
+
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    const result = renderComposite(canvasRef.current, bp, {
+      layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve, sizePx: 1400,
+    });
+    setStats(result);
+  }, [bp, layersOn, showOverlay, showShadows, jitter, globalScale, lightAngle, resolve]);
+
+  const rebuildAsset = (rec) => {
+    const img = new Image();
+    img.onload = () => {
+      const o = ORIENTS.find((x) => x.id === rec.orient);
+      const prepared = prepareImage(img, o ? o.deg : 0, rec.stripWhite);
+      const silhouette = makeSilhouette(prepared);
+      setAssets((prev) => prev.map((a) => (a.id === rec.id ? Object.assign({}, a, rec, { prepared, silhouette }) : a)));
+    };
+    img.src = rec.dataUrl;
+  };
+
+  const onFiles = (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    setBusy(true);
+    let remaining = files.length;
+    files.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const id = __uid++;
+        const img = new Image();
+        img.onload = () => {
+          const prepared = prepareImage(img, 0, true);
+          const silhouette = makeSilhouette(prepared);
+          const unmapped = blueprintSkus.find((s) => !assets.some((a) => a.sku === s));
+          setAssets((prev) => prev.concat([{
+            id, sku: unmapped || ("EC-NEW-" + id),
+            name: file.name.replace(/\.[^.]+$/, ""),
+            dataUrl: reader.result,
+            real_width_in: 3.0, layer_class: "secondary", rotation_mode: "camera_facing",
+            orient: "none", stripWhite: true,
+            anchor: { x: 0.5, y: 0.5 },
+            prepared, silhouette,
+          }]));
+          remaining--; if (remaining <= 0) setBusy(false);
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = "";
+  };
+
+  const updateAsset = (id, patch, reprepare) => {
+    setAssets((prev) => {
+      const next = prev.map((a) => (a.id === id ? Object.assign({}, a, patch) : a));
+      if (reprepare) {
+        const rec = next.find((a) => a.id === id);
+        if (rec) setTimeout(() => rebuildAsset(rec), 0);
+      }
+      return next;
+    });
+  };
+  const removeAsset = (id) => setAssets((prev) => prev.filter((a) => a.id !== id));
+
+  const exportManifest = () => {
+    const out = {
+      version: "BRC-3.0",
+      exported: new Date().toISOString(),
+      assets: assets.map((a) => ({
+        sku: a.sku, name: a.name, real_width_in: a.real_width_in,
+        layer_class: a.layer_class, rotation_mode: a.rotation_mode,
+        orient: a.orient, strip_white: a.stripWhite, anchor_point: a.anchor,
+        image_dataurl: a.dataUrl,
+      })),
+    };
+    const blob = new Blob([JSON.stringify(out)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "evercrafted-asset-manifest.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  const importManifest = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        (data.assets || []).forEach((rec) => {
+          const id = __uid++;
+          const img = new Image();
+          img.onload = () => {
+            const o = ORIENTS.find((x) => x.id === rec.orient);
+            const prepared = prepareImage(img, o ? o.deg : 0, rec.strip_white !== false);
+            const silhouette = makeSilhouette(prepared);
+            setAssets((prev) => prev.concat([{
+              id, sku: rec.sku, name: rec.name, dataUrl: rec.image_dataurl,
+              real_width_in: rec.real_width_in != null ? rec.real_width_in : 3,
+              layer_class: rec.layer_class || "secondary",
+              rotation_mode: rec.rotation_mode || "camera_facing", orient: rec.orient || "none",
+              stripWhite: rec.strip_white !== false,
+              anchor: rec.anchor_point || { x: 0.5, y: 0.5 },
+              prepared, silhouette,
+            }]));
+          };
+          img.src = rec.image_dataurl;
+        });
+      } catch (err) { alert("Manifest could not be read: " + err.message); }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  const applyJson = useCallback(() => {
+    try {
+      const parsed = JSON.parse(jsonText);
+      if (!parsed.canvas || !parsed.canvas.diameter_in) throw new Error("canvas.diameter_in is required");
+      setBlueprint(parsed);
+      if (typeof parsed.seed === "number") setSeed(parsed.seed);
+      setJsonError(null);
+    } catch (e2) { setJsonError(e2.message); }
+  }, [jsonText]);
+
+  const exportPNG = useCallback(() => {
+    const off = document.createElement("canvas");
+    renderComposite(off, bp, {
+      layersOn, showOverlay: false, showShadows, jitter, globalScale, lightAngle, resolve, sizePx: 3000,
+    });
+    const a = document.createElement("a");
+    a.href = off.toDataURL("image/png");
+    a.download = (bp.blueprint_id || "EC_WR") + "_seed" + seed + "_proof_3000.png";
+    a.click();
+  }, [bp, layersOn, showShadows, jitter, globalScale, lightAngle, resolve, seed]);
+
+  const runEditorial = useCallback(async () => {
+    setEdBusy(true); setEdError(null); setEdResult(null);
+    try {
+      const off = document.createElement("canvas");
+      renderComposite(off, bp, {
+        layersOn, showOverlay: false, showShadows, jitter, globalScale, lightAngle, resolve, sizePx: 1408,
+      });
+      const proofDataUrl = off.toDataURL("image/jpeg", 0.92);
+      const r = await fetch("/api/realism", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: proofDataUrl, prompt: edPrompt, mode: "kontext" }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error((data && data.error) || ("Proxy returned " + r.status));
+      if (!data.output) throw new Error("Proxy returned no output image");
+      setEdResult({ url: data.output, proofDataUrl });
+    } catch (err) {
+      setEdError(err.message || "Editorial pass failed");
+    } finally {
+      setEdBusy(false);
+    }
+  }, [edPrompt, bp, layersOn, showShadows, jitter, globalScale, lightAngle, resolve]);
+
+  const mappedCount = blueprintSkus.filter((s) => assets.some((a) => a.sku === s && a.prepared)).length;
+  const silenceRejects = stats.rejected.filter((r) => r.reason === "silence_arc").length;
+  const skuRejects = stats.rejected.filter((r) => r.reason === "unresolved_sku").length;
+
+  return (
+    <div style={S.app}>
+      <header style={S.header}>
+        <div>
+          <div style={S.brand}>Evercrafted</div>
+          <h1 style={S.title}>Blueprint-to-Render Compositor</h1>
+        </div>
+        <div style={S.headerMeta}>
+          <span style={S.badge}>BRC-3.0 · Hosted</span>
+          <span style={S.badgeOutline}>Proof + Editorial</span>
+        </div>
+      </header>
+
+      <div style={S.main}>
+        <div style={S.canvasWrap}>
+          <canvas ref={canvasRef} style={S.canvas} />
+          <div style={S.canvasFooter}>
+            <span>{bp.blueprint_id} · {bp.formula} · {bp.canvas ? bp.canvas.diameter_in : ""}″ form</span>
+            <span>{stats.pxPerIn.toFixed(1)} px/in · seed {seed} · {mappedCount}/{blueprintSkus.length} SKUs live</span>
+          </div>
+        </div>
+
+        <aside style={S.panel}>
+          <div style={S.section}>
+            <div style={S.sectionLabel}>Seed</div>
+            <div style={S.row}>
+              <input type="number" value={seed}
+                onChange={(e) => setSeed(parseInt(e.target.value || "0", 10))} style={S.input} />
+              <button onClick={() => setSeed(Math.floor(Math.random() * 99999))} style={S.btnGhost}>Reroll</button>
+            </div>
+          </div>
+
+          <div style={S.section}>
+            <div style={S.sectionLabel}>Organic Variance — {Math.round(jitter * 100)}%</div>
+            <input type="range" min="0" max="1" step="0.05" value={jitter}
+              onChange={(e) => setJitter(parseFloat(e.target.value))} style={S.slider} />
+            <div style={S.sectionLabel}>True-Scale Multiplier — {globalScale.toFixed(2)}×</div>
+            <input type="range" min="0.8" max="1.25" step="0.01" value={globalScale}
+              onChange={(e) => setGlobalScale(parseFloat(e.target.value))} style={S.slider} />
+            <div style={S.sectionLabel}>Key Light — {lightAngle}°</div>
+            <input type="range" min="0" max="360" step="5" value={lightAngle}
+              onChange={(e) => setLightAngle(parseInt(e.target.value, 10))} style={S.slider} />
+          </div>
+
+          <div style={S.section}>
+            <div style={S.sectionLabel}>Z-Stack Layers</div>
+            {LAYER_ORDER.map((L) => (
+              <label key={L} style={S.check}>
+                <input type="checkbox" checked={layersOn[L]}
+                  onChange={() => setLayersOn((p) => Object.assign({}, p, { [L]: !p[L] }))} />
+                <span style={{ textTransform: "capitalize" }}>{L}</span>
+              </label>
+            ))}
+            <label style={S.check}>
+              <input type="checkbox" checked={showShadows} onChange={() => setShowShadows((v) => !v)} />
+              <span>Silhouette shadows</span>
+            </label>
+            <label style={S.check}>
+              <input type="checkbox" checked={showOverlay} onChange={() => setShowOverlay((v) => !v)} />
+              <span>Blueprint overlay</span>
+            </label>
+          </div>
+
+          <div style={S.section}>
+            <div style={S.sectionLabel}>Engine Report</div>
+            <div style={S.stat}><span>Instances placed</span><b>{stats.count}</b></div>
+            <div style={S.stat}><span>Silence-arc enforced</span><b>{silenceRejects}</b></div>
+            <div style={S.stat}><span>Real assets live</span><b>{mappedCount} / {blueprintSkus.length}</b></div>
+            <div style={S.stat}>
+              <span>Unresolved SKUs</span>
+              <b style={{ color: skuRejects ? "#a8502e" : undefined }}>{skuRejects}</b>
+            </div>
+          </div>
+
+          <button onClick={exportPNG} style={S.btnPrimary}>Export Proof PNG · 3000px</button>
+          <button onClick={() => setShowJson((v) => !v)} style={S.btnGhostWide}>
+            {showJson ? "Hide" : "Edit"} Blueprint JSON
+          </button>
+        </aside>
+      </div>
+
+      {showJson && (
+        <div style={S.jsonWrap}>
+          <div style={S.sectionLabel}>Blueprint JSON — EC_WR_V2</div>
+          <textarea value={jsonText} onChange={(e) => setJsonText(e.target.value)} spellCheck={false} style={S.textarea} />
+          <div style={S.row}>
+            <button onClick={applyJson} style={S.btnPrimary}>Apply Blueprint</button>
+            {jsonError && <span style={S.error}>⚠ {jsonError}</span>}
+          </div>
+        </div>
+      )}
+
+      <div style={S.editorialWrap}>
+        <div style={{ marginBottom: 14 }}>
+          <div style={S.sectionLabel}>Editorial Mode — the only AI touchpoint</div>
+          <div style={S.hint}>
+            Connected automatically to this project's own /api/realism endpoint — same server, no configuration.
+            The pass may heal seams, unify lighting, and add photographic texture. It is instructed to move nothing. You are the QA gate.
+          </div>
+        </div>
+        <div style={S.editorialGrid}>
+          <div>
+            <label style={S.fieldLabel}>Realism instruction (preservation language locked in by default)
+              <textarea value={edPrompt} onChange={(e) => setEdPrompt(e.target.value)}
+                style={Object.assign({}, S.textarea, { height: 150, marginBottom: 0 })} spellCheck={false} />
+            </label>
+            <div style={Object.assign({}, S.row, { marginTop: 12 })}>
+              <button onClick={runEditorial} disabled={edBusy} style={S.btnPrimary}>
+                {edBusy ? "Rendering Editorial…" : "Run Editorial Pass"}
+              </button>
+              {edError && <span style={S.error}>⚠ {edError}</span>}
+            </div>
+          </div>
+          {edResult && (
+            <div style={S.compareWrap}>
+              <div style={S.compareCol}>
+                <div style={S.compareLabel}>Proof — structural truth</div>
+                <img src={edResult.proofDataUrl} alt="Proof render" style={S.compareImg} />
+              </div>
+              <div style={S.compareCol}>
+                <div style={S.compareLabel}>Editorial — realism pass</div>
+                <img src={edResult.url} alt="Editorial render" style={S.compareImg} />
+                <div style={S.qaBox}>
+                  <div style={S.sectionLabel}>QA before accepting</div>
+                  <div style={S.hint}>
+                    Same stem count? Same species and colors? Silence arc still bare? Nothing added or moved?
+                    If anything drifted, reject — the Proof is always the source of truth.
+                  </div>
+                  <div style={Object.assign({}, S.row, { marginTop: 10 })}>
+                    <a href={edResult.url} target="_blank" rel="noreferrer" style={Object.assign({}, S.btnPrimary, { textDecoration: "none", display: "inline-block" })}>
+                      Accept · Open Full Size
+                    </a>
+                    <button onClick={() => setEdResult(null)} style={S.btnDanger}>Reject — keep Proof</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div style={S.libraryWrap}>
+        <div style={S.libraryHeader}>
+          <div>
+            <div style={S.sectionLabel}>Asset Library — your real stems</div>
+            <div style={S.hint}>
+              Upload cutout PNGs (white backgrounds are stripped automatically). Tag SKU, true width, layer, and anchor. Export the manifest to keep your tagging.
+            </div>
+          </div>
+          <div style={S.row}>
+            <button onClick={() => fileRef.current && fileRef.current.click()} style={S.btnPrimary}>
+              {busy ? "Loading…" : "Upload Cutouts"}
+            </button>
+            <button onClick={exportManifest} style={S.btnGhost} disabled={!assets.length}>Export Manifest</button>
+            <button onClick={() => manifestRef.current && manifestRef.current.click()} style={S.btnGhost}>Import Manifest</button>
+          </div>
+          <input ref={fileRef} type="file" accept="image/png,image/webp,image/jpeg" multiple style={{ display: "none" }} onChange={onFiles} />
+          <input ref={manifestRef} type="file" accept="application/json" style={{ display: "none" }} onChange={importManifest} />
+        </div>
+
+        {!assets.length && (
+          <div style={S.empty}>
+            No real assets yet — rendering on procedural placeholders. Upload cutouts and assign them to blueprint SKUs ({blueprintSkus.join(" · ")}).
+          </div>
+        )}
+
+        <div style={S.assetGrid}>
+          {assets.map((a) => (
+            <div key={a.id} style={S.assetCard}>
+              <div style={S.assetThumbWrap}>
+                {a.prepared && <img src={a.prepared.toDataURL()} alt={a.name} style={S.assetThumb} />}
+              </div>
+              <div style={S.assetFields}>
+                <label style={S.fieldLabel}>SKU mapping
+                  <select value={blueprintSkus.includes(a.sku) ? a.sku : "__custom"}
+                    onChange={(e) => { if (e.target.value !== "__custom") updateAsset(a.id, { sku: e.target.value }); }}
+                    style={S.select}>
+                    {blueprintSkus.map((s) => <option key={s} value={s}>{s}</option>)}
+                    <option value="__custom">custom…</option>
+                  </select>
+                </label>
+                {!blueprintSkus.includes(a.sku) && (
+                  <label style={S.fieldLabel}>Custom SKU
+                    <input value={a.sku} onChange={(e) => updateAsset(a.id, { sku: e.target.value })} style={S.input} />
+                  </label>
+                )}
+                <label style={S.fieldLabel}>True width (inches)
+                  <input type="number" step="0.1" min="0.5" value={a.real_width_in}
+                    onChange={(e) => updateAsset(a.id, { real_width_in: parseFloat(e.target.value || "1") })} style={S.input} />
+                </label>
+                <label style={S.fieldLabel}>Layer
+                  <select value={a.layer_class} onChange={(e) => updateAsset(a.id, { layer_class: e.target.value })} style={S.select}>
+                    {LAYER_ORDER.filter((l) => l !== "base").map((l) => <option key={l} value={l}>{l}</option>)}
+                  </select>
+                </label>
+                <label style={S.fieldLabel}>Rotation
+                  <select value={a.rotation_mode} onChange={(e) => updateAsset(a.id, { rotation_mode: e.target.value })} style={S.select}>
+                    <option value="camera_facing">camera facing</option>
+                    <option value="tangent">tangent (foliage)</option>
+                  </select>
+                </label>
+                <label style={S.fieldLabel}>Orientation
+                  <select value={a.orient} onChange={(e) => updateAsset(a.id, { orient: e.target.value }, true)} style={S.select}>
+                    {ORIENTS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                  </select>
+                </label>
+                <label style={Object.assign({}, S.check, { fontSize: 12.5 })}>
+                  <input type="checkbox" checked={a.stripWhite}
+                    onChange={(e) => updateAsset(a.id, { stripWhite: e.target.checked }, true)} />
+                  <span>Strip white background</span>
+                </label>
+                {a.rotation_mode === "tangent" && (
+                  <div style={S.hint}>Tangent stems must grow toward the RIGHT after orientation.</div>
+                )}
+                <div style={S.row}>
+                  <button onClick={() => setOpenAsset(openAsset === a.id ? null : a.id)} style={S.btnGhost}>
+                    {openAsset === a.id ? "Close anchor" : "Set anchor"}
+                  </button>
+                  <button onClick={() => removeAsset(a.id)} style={S.btnDanger}>Remove</button>
+                </div>
+                {openAsset === a.id && a.prepared && (
+                  <AnchorPicker asset={a} onSet={(anchor) => updateAsset(a.id, { anchor })} />
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <footer style={S.footer}>
+        AI interprets · geometry places. The Proof render is permanently authoritative — Editorial output that adds, removes, or moves any element fails QA by definition. Keys live server-side only.
+      </footer>
+    </div>
+  );
+}
+
+const S = {
+  app: { minHeight: "100vh", background: "#F9F7F4", color: "#26241F", fontFamily: "'Inter', sans-serif", padding: "28px clamp(16px,4vw,56px) 48px" },
+  header: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", borderBottom: "1px solid rgba(74,103,65,0.22)", paddingBottom: 18, marginBottom: 26, flexWrap: "wrap", gap: 12 },
+  brand: { fontFamily: "'Cormorant Garamond', serif", fontSize: 15, letterSpacing: "0.34em", textTransform: "uppercase", color: "#4A6741", fontWeight: 600 },
+  title: { fontFamily: "'Cormorant Garamond', serif", fontWeight: 500, fontSize: "clamp(28px,4vw,42px)", margin: "4px 0 0", lineHeight: 1.05, color: "#2E3F2A" },
+  headerMeta: { display: "flex", gap: 10, alignItems: "center" },
+  badge: { background: "#4A6741", color: "#F9F7F4", fontSize: 11, letterSpacing: "0.12em", padding: "6px 12px", borderRadius: 999, fontWeight: 500 },
+  badgeOutline: { border: "1px solid #B0793F", color: "#B0793F", fontSize: 11, letterSpacing: "0.12em", padding: "5px 12px", borderRadius: 999, fontWeight: 500 },
+  main: { display: "flex", gap: 26, alignItems: "flex-start", flexWrap: "wrap" },
+  canvasWrap: { flex: "1 1 520px", minWidth: 320 },
+  canvas: { width: "100%", aspectRatio: "1/1", borderRadius: 4, display: "block", boxShadow: "0 24px 60px -28px rgba(46,63,42,0.35), 0 2px 8px rgba(46,63,42,0.08)", background: "#FCFBF8" },
+  canvasFooter: { display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "rgba(38,36,31,0.55)", marginTop: 10, letterSpacing: "0.04em", flexWrap: "wrap", gap: 6 },
+  panel: { flex: "0 0 300px", display: "flex", flexDirection: "column", gap: 18, minWidth: 270 },
+  section: { background: "#FFFFFF", border: "1px solid rgba(74,103,65,0.14)", borderRadius: 6, padding: "16px 18px" },
+  sectionLabel: { fontSize: 11, letterSpacing: "0.18em", textTransform: "uppercase", color: "#4A6741", fontWeight: 600, marginBottom: 10 },
+  row: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
+  input: { padding: "8px 11px", border: "1px solid rgba(74,103,65,0.3)", borderRadius: 4, fontSize: 13.5, fontFamily: "'Inter', sans-serif", background: "#FCFBF8", color: "#26241F", width: "100%", boxSizing: "border-box" },
+  select: { padding: "8px 11px", border: "1px solid rgba(74,103,65,0.3)", borderRadius: 4, fontSize: 13.5, fontFamily: "'Inter', sans-serif", background: "#FCFBF8", color: "#26241F", width: "100%", boxSizing: "border-box" },
+  slider: { width: "100%", margin: "2px 0 14px" },
+  check: { display: "flex", gap: 9, alignItems: "center", fontSize: 13.5, padding: "5px 0", cursor: "pointer" },
+  stat: { display: "flex", justifyContent: "space-between", fontSize: 13, padding: "5px 0", borderBottom: "1px dashed rgba(74,103,65,0.12)" },
+  hint: { fontSize: 11.5, color: "rgba(38,36,31,0.5)", marginTop: 8, lineHeight: 1.5 },
+  btnPrimary: { background: "#2E3F2A", color: "#F9F7F4", border: "none", borderRadius: 4, padding: "12px 18px", fontSize: 12.5, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600, cursor: "pointer", fontFamily: "'Inter', sans-serif" },
+  btnGhost: { background: "transparent", color: "#4A6741", border: "1px solid rgba(74,103,65,0.4)", borderRadius: 4, padding: "9px 14px", fontSize: 12.5, cursor: "pointer", fontWeight: 500, fontFamily: "'Inter', sans-serif" },
+  btnGhostWide: { background: "transparent", color: "#4A6741", border: "1px solid rgba(74,103,65,0.4)", borderRadius: 4, padding: "12px 18px", fontSize: 12.5, letterSpacing: "0.08em", textTransform: "uppercase", cursor: "pointer", fontWeight: 500, fontFamily: "'Inter', sans-serif" },
+  btnDanger: { background: "transparent", color: "#a8502e", border: "1px solid rgba(168,80,46,0.4)", borderRadius: 4, padding: "9px 14px", fontSize: 12.5, cursor: "pointer", fontWeight: 500, fontFamily: "'Inter', sans-serif" },
+  jsonWrap: { marginTop: 28, background: "#FFFFFF", border: "1px solid rgba(74,103,65,0.14)", borderRadius: 6, padding: "16px 18px" },
+  textarea: { width: "100%", height: 320, fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, border: "1px solid rgba(74,103,65,0.25)", borderRadius: 4, padding: 14, background: "#FCFBF8", color: "#26241F", marginBottom: 12, resize: "vertical", boxSizing: "border-box" },
+  error: { color: "#a8502e", fontSize: 12.5 },
+  editorialWrap: { marginTop: 28, background: "#FFFFFF", border: "1px solid rgba(176,121,63,0.35)", borderRadius: 6, padding: "18px 20px" },
+  editorialGrid: { display: "flex", flexDirection: "column", gap: 18 },
+  compareWrap: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 18 },
+  compareCol: { display: "flex", flexDirection: "column", gap: 8 },
+  compareLabel: { fontSize: 11, letterSpacing: "0.16em", textTransform: "uppercase", color: "rgba(38,36,31,0.6)", fontWeight: 600 },
+  compareImg: { width: "100%", borderRadius: 4, border: "1px solid rgba(74,103,65,0.18)", background: "#FCFBF8" },
+  qaBox: { border: "1px dashed rgba(176,121,63,0.45)", borderRadius: 6, padding: "12px 14px", marginTop: 4 },
+  libraryWrap: { marginTop: 28, background: "#FFFFFF", border: "1px solid rgba(74,103,65,0.14)", borderRadius: 6, padding: "18px 20px" },
+  libraryHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, flexWrap: "wrap", marginBottom: 14 },
+  empty: { padding: "26px 20px", textAlign: "center", fontSize: 13.5, color: "rgba(38,36,31,0.55)", border: "1.5px dashed rgba(74,103,65,0.3)", borderRadius: 6, lineHeight: 1.6 },
+  assetGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 },
+  assetCard: { border: "1px solid rgba(74,103,65,0.16)", borderRadius: 6, overflow: "hidden", background: "#FCFBF8" },
+  assetThumbWrap: { height: 150, display: "flex", alignItems: "center", justifyContent: "center", background: "repeating-conic-gradient(#EFEDE6 0% 25%, #F8F6F1 0% 50%) 0 0 / 18px 18px", borderBottom: "1px solid rgba(74,103,65,0.12)" },
+  assetThumb: { maxHeight: 140, maxWidth: "92%", objectFit: "contain" },
+  assetFields: { padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8 },
+  fieldLabel: { fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "rgba(38,36,31,0.55)", display: "flex", flexDirection: "column", gap: 4, fontWeight: 500 },
+  footer: { marginTop: 30, fontSize: 12, color: "rgba(38,36,31,0.5)", lineHeight: 1.6, borderTop: "1px solid rgba(74,103,65,0.16)", paddingTop: 16, maxWidth: 760 },
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<BRCApp />);
+</script>
+</body>
+</html>
