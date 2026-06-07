@@ -21,7 +21,7 @@
 <div id="root"></div>
 <script type="text/babel" data-presets="env,react">
 /* ════════════════════════════════════════════════════════════════════
-   EVERCRAFTED — WREATH RENDER STUDIO · BRC-4.0
+   EVERCRAFTED — WREATH RENDER STUDIO · BRC-4.1 (PRD 1.1 compliant)
    Clean rebuild. Operating rules of this version:
    1. PROMPTS ARE FROZEN PRESETS. The app never edits them. You select.
    2. EVERY EDITORIAL RENDER IS SEEDED. Same Proof + prompt + seed =
@@ -30,6 +30,14 @@
       its exact preset + seed, persisted in this browser. Nothing that
       works can be lost again.
    4. The Proof is deterministic and authoritative. AI never places.
+
+   BRC-1.1 compliance (see PRD §2–§3):
+   • COMPASS coordinate convention — 0°=12 o'clock, CW; 90°→3 o'clock.
+     Math-convention transforms are banned (see polarToXY). Ships with a
+     self-test asserting the cardinal positions.
+   • Dual anchoring — visual_centroid is pinned to the blueprint polar
+     position; insertion_point is the rotation pivot.
+   • Deterministic within-layer draw order — radius desc, angle asc, idx.
    ════════════════════════════════════════════════════════════════════ */
 const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
@@ -50,9 +58,60 @@ function inArc(angle, from, to) {
   const a = normDeg(angle), f = normDeg(from), t = normDeg(to);
   return f <= t ? a >= f && a <= t : a >= f || a <= t;
 }
+/* COMPASS CONVENTION (PIE canon, BRC-1.1 §2 — non-negotiable):
+   blueprint angles are compass degrees — 0° = 12 o'clock, increasing
+   CLOCKWISE. 90° = 3 o'clock, 180° = 6, 270° = 9. The transform is:
+     x = cx + r·cos(θ − 90°)
+     y = cy + r·sin(θ − 90°)
+   Math-convention (CCW from 3 o'clock, −sin) is BANNED — it renders
+   rotated 90° and mirrored. Any imported library/research code using
+   math convention must be translated at this boundary. */
 function polarToXY(cx, cy, angleDeg, radiusPx) {
-  return { x: cx + radiusPx * Math.cos(angleDeg * D2R), y: cy - radiusPx * Math.sin(angleDeg * D2R) };
+  const t = (angleDeg - 90) * D2R;
+  return { x: cx + radiusPx * Math.cos(t), y: cy + radiusPx * Math.sin(t) };
 }
+/* canvas-arc angle (radians from +x, CW because y is down) for a compass
+   bearing — used by overlay wedges that call ctx.arc directly. */
+const compassToArc = (deg) => (deg - 90) * D2R;
+
+/* ═══════════ self-tests — BRC-1.1 v1 requirement ═══════════
+   The artifact ships with the canonical checks. The headline assertion:
+   a cluster at angle_deg 90 renders at the 3-o'clock position. Also
+   guards PRNG determinism and the within-layer draw order. Runs once on
+   load; the result is surfaced as a badge in the header. */
+function withinLayerCmp(x, y) {
+  return (y.radiusNorm || 0) - (x.radiusNorm || 0)
+    || (x.angleDeg || 0) - (y.angleDeg || 0)
+    || x.idx - y.idx;
+}
+function runSelfTests() {
+  const results = [];
+  const approx = (a, b, t = 0.5) => Math.abs(a - b) <= t;
+  const check = (name, cond) => results.push({ name, pass: !!cond });
+  [
+    [0, 0, -100, "12 o'clock"],
+    [90, 100, 0, "3 o'clock"],
+    [180, 0, 100, "6 o'clock"],
+    [270, -100, 0, "9 o'clock"],
+  ].forEach(([deg, ex, ey, label]) => {
+    const p = polarToXY(0, 0, deg, 100);
+    check("compass " + deg + "° → " + label, approx(p.x, ex) && approx(p.y, ey));
+  });
+  const a = mulberry32(42), b = mulberry32(42);
+  check("mulberry32 deterministic", a() === b() && a() === b());
+  const sorted = [
+    { radiusNorm: 0.8, angleDeg: 90, idx: 2 },
+    { radiusNorm: 0.9, angleDeg: 10, idx: 1 },
+    { radiusNorm: 0.8, angleDeg: 40, idx: 0 },
+  ].sort(withinLayerCmp);
+  check("within-layer order (radius↓, angle↑)",
+    sorted[0].radiusNorm === 0.9 && sorted[1].angleDeg === 40 && sorted[2].angleDeg === 90);
+  const pass = results.every((r) => r.pass);
+  if (pass) console.log("BRC-1.1 self-tests passed (" + results.length + ")");
+  else results.filter((r) => !r.pass).forEach((r) => console.error("BRC self-test FAIL:", r.name));
+  return { pass, results };
+}
+const SELF_TEST = runSelfTests();
 
 /* ─────────── IndexedDB persistence ─────────── */
 function idbOpen() {
@@ -423,15 +482,19 @@ function buildInstances(bp, opts) {
       let rad, rotation;
       if (flared) {
         rad = rrange(frng, 0.86, 0.97);
-        rotation = -(ang * D2R) + rrange(frng, -0.3, 0.3);
+        /* radial-outward: compass tangent (ang·D2R) rotated −90° points out */
+        rotation = ang * D2R - Math.PI / 2 + rrange(frng, -0.3, 0.3);
       } else {
         rad = sw.radius_norm + rrange(rng, -0.045, 0.045) * jitter;
-        const tangent = -(ang * D2R) + (sw.flow === "cw" ? Math.PI / 2 : -Math.PI / 2);
+        /* tangent to the ring under compass convention: the CW tangent
+           screen direction at bearing θ is (cos θ, sin θ) → rotate by θ. */
+        const tangent = ang * D2R + (sw.flow === "cw" ? 0 : Math.PI);
         rotation = tangent + rrange(rng, -0.3, 0.3) * jitter;
       }
       const pos = polarToXY(cx, cy, ang, rad * wreathRadiusPx);
       instances.push({
         idx, item_id: sw.item_id, res, x: pos.x, y: pos.y, rotation,
+        angleDeg: ang, radiusNorm: rad,
         sizePx: res.real_width_in * pxPerIn * globalScale * rrange(rng, 0.85, 1.12) * (flared ? 0.85 : 1),
         mirror: rng() > 0.5, layer: res.layer_class,
         seedLocal: bp.seed * 9973 + idx * 271,
@@ -453,9 +516,11 @@ function buildInstances(bp, opts) {
         if (!inSilence(cang)) {
           const crad = cl.radius_norm - 0.015 + rrange(crng, -0.02, 0.02);
           const cpos = polarToXY(cx, cy, cang, crad * wreathRadiusPx);
-          const ctan = -(cang * D2R) + (k === 0 ? -Math.PI / 2 : Math.PI / 2);
+          /* tangent under compass convention; k flips which way it sweeps */
+          const ctan = cang * D2R + (k === 0 ? Math.PI : 0);
           instances.push({
             idx, item_id: collarSku, res: collarRes, x: cpos.x, y: cpos.y,
+            angleDeg: cang, radiusNorm: crad,
             rotation: ctan + rrange(crng, -0.35, 0.35),
             sizePx: collarRes.real_width_in * pxPerIn * globalScale * rrange(crng, 0.7, 0.9),
             mirror: crng() > 0.5, layer: "foliage",
@@ -479,7 +544,10 @@ function buildInstances(bp, opts) {
         const pos = polarToXY(cx, cy, ang, rad * wreathRadiusPx);
         instances.push({
           idx, item_id: stem.item_id, res, x: pos.x, y: pos.y,
-          rotation: res.rotation_mode === "camera_facing" ? rrange(rng, -0.26, 0.26) : -(ang * D2R) + Math.PI / 2,
+          angleDeg: ang, radiusNorm: rad,
+          /* camera-facing: small upright tilt. tangent/radial stems lie
+             along the compass tangent (ang·D2R) at their bearing. */
+          rotation: res.rotation_mode === "camera_facing" ? rrange(rng, -0.26, 0.26) : ang * D2R,
           sizePx: res.real_width_in * pxPerIn * globalScale * rrange(rng, 0.92, 1.08),
           mirror: rng() > 0.5 && res.rotation_mode === "camera_facing",
           layer: res.layer_class,
@@ -491,7 +559,14 @@ function buildInstances(bp, opts) {
     });
   });
 
-  instances.sort((a, b) => LAYER_ORDER.indexOf(a.layer) - LAYER_ORDER.indexOf(b.layer) || a.idx - b.idx);
+  /* Deterministic draw order (BRC-1.1 §3). Across layers: z-stack order.
+     Within a layer: radius DESC (outer draws first, inner overlaps),
+     then angle ASC, then instance index — ties broken identically every
+     run, so same seed + same inputs = pixel-identical output. Never rely
+     on object-iteration order. */
+  instances.sort((a, b) =>
+    LAYER_ORDER.indexOf(a.layer) - LAYER_ORDER.indexOf(b.layer)
+    || withinLayerCmp(a, b));
   return { instances, rejected, pxPerIn, wreathRadiusPx, cx, cy };
 }
 
@@ -502,7 +577,13 @@ function drawInstance(ctx, inst, mode) {
     if (!src) return;
     const W = inst.sizePx;
     const H = W * (res.prepared.height / res.prepared.width);
-    ctx.drawImage(src, -res.anchor.x * W, -res.anchor.y * H, W, H);
+    /* BRC-1.1: the blueprint's polar coordinate addresses the VISUAL
+       CENTROID of the bloom head — pin that to (inst.x, inst.y), not the
+       stem insertion point, or balance/asymmetry desyncs from the image.
+       (insertion_point is the conceptual rotation pivot; with an absolute
+       rotation + centroid pin the rigid transform is identical either way.) */
+    const c = res.visual_centroid || { x: 0.5, y: 0.5 };
+    ctx.drawImage(src, -c.x * W, -c.y * H, W, H);
   } else {
     if (mode === "sil") {
       const sil = res.silhouette;
@@ -588,7 +669,11 @@ function renderComposite(canvas, bp, opts) {
     (bp.silence_arcs || []).forEach((s) => {
       ctx.fillStyle = "rgba(176,121,63,0.10)";
       ctx.beginPath(); ctx.moveTo(cx, cy);
-      ctx.arc(cx, cy, wreathRadiusPx * 1.02, -s.from_deg * D2R, -s.to_deg * D2R, true);
+      /* compass bearings → canvas-arc angles; CW (anticlockwise=false)
+         from_deg → to_deg matches compass increasing clockwise. */
+      const a0 = compassToArc(s.from_deg);
+      const a1 = compassToArc(s.to_deg < s.from_deg ? s.to_deg + 360 : s.to_deg);
+      ctx.arc(cx, cy, wreathRadiusPx * 1.02, a0, a1, false);
       ctx.closePath(); ctx.fill();
     });
     (bp.clusters || []).forEach((cl) => {
@@ -610,9 +695,22 @@ function renderComposite(canvas, bp, opts) {
   return { count: instances.length, rejected, pxPerIn, itemCounts };
 }
 
-/* ═══════════ anchor picker ═══════════ */
+/* ═══════════ anchor picker — dual point (BRC-1.1 §4) ═══════════
+   visual_centroid (green) is pinned to the blueprint polar position.
+   insertion_point (amber) is the stem→base point / rotation pivot. */
+function crosshair(ctx, x, y, color) {
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - 13, y); ctx.lineTo(x + 13, y);
+  ctx.moveTo(x, y - 13); ctx.lineTo(x, y + 13);
+  ctx.stroke();
+}
 function AnchorPicker({ asset, onSet }) {
   const ref = useRef(null);
+  const [editing, setEditing] = useState("visual_centroid");
+  const centroid = asset.visual_centroid || { x: 0.5, y: 0.5 };
+  const insertion = asset.insertion_point || { x: 0.5, y: 0.92 };
   useEffect(() => {
     const cv = ref.current;
     if (!cv || !asset.prepared) return;
@@ -623,25 +721,30 @@ function AnchorPicker({ asset, onSet }) {
     ctx.fillStyle = "#EFEDE6";
     ctx.fillRect(0, 0, cv.width, cv.height);
     ctx.drawImage(asset.prepared, 0, 0, cv.width, cv.height);
-    const ax = asset.anchor.x * cv.width, ay = asset.anchor.y * cv.height;
-    ctx.strokeStyle = "#B0793F"; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(ax, ay, 8, 0, Math.PI * 2); ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(ax - 13, ay); ctx.lineTo(ax + 13, ay);
-    ctx.moveTo(ax, ay - 13); ctx.lineTo(ax, ay + 13);
-    ctx.stroke();
-  }, [asset]);
+    crosshair(ctx, insertion.x * cv.width, insertion.y * cv.height, "#B0793F");
+    crosshair(ctx, centroid.x * cv.width, centroid.y * cv.height, "#4A6741");
+  }, [asset, editing]);
   const click = (e) => {
     const rect = ref.current.getBoundingClientRect();
-    onSet({
+    const pt = {
       x: Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)),
       y: Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height)),
-    });
+    };
+    onSet({ [editing]: pt });
   };
   return (
     <div>
+      <div style={Object.assign({}, S.row, { marginBottom: 8 })}>
+        <button onClick={() => setEditing("visual_centroid")}
+          style={editing === "visual_centroid" ? S.btnPrimary : S.btnGhost}>● Visual centroid</button>
+        <button onClick={() => setEditing("insertion_point")}
+          style={editing === "insertion_point" ? S.btnPrimary : S.btnGhost}>● Insertion point</button>
+      </div>
       <canvas ref={ref} onClick={click} style={{ cursor: "crosshair", borderRadius: 4, display: "block", maxWidth: "100%" }} />
-      <div style={S.hint}>Click the stem insertion point — it becomes the rotation origin.</div>
+      <div style={S.hint}>
+        Green = visual centroid (pinned to the blueprint position — set it on the bloom head's center).
+        Amber = insertion point (where the stem meets the base — the rotation pivot).
+      </div>
     </div>
   );
 }
@@ -709,7 +812,8 @@ function Studio() {
     if (up) {
       return {
         kind: "image", prepared: up.prepared, silhouette: up.silhouette,
-        anchor: up.anchor, real_width_in: up.real_width_in,
+        insertion_point: up.insertion_point, visual_centroid: up.visual_centroid,
+        real_width_in: up.real_width_in,
         layer_class: up.layer_class, rotation_mode: up.rotation_mode, name: up.name,
       };
     }
@@ -740,7 +844,10 @@ function Studio() {
         layer_class: rec.layer_class || "secondary",
         rotation_mode: rec.rotation_mode || "camera_facing", orient: rec.orient || "none",
         stripWhite: rec.strip_white !== false,
-        anchor: rec.anchor_point || { x: 0.5, y: 0.5 },
+        /* dual anchor (BRC-1.1). Back-compat: a legacy single anchor_point
+           was the insertion point, so fold it forward there. */
+        insertion_point: rec.insertion_point || rec.anchor_point || { x: 0.5, y: 0.92 },
+        visual_centroid: rec.visual_centroid || { x: 0.5, y: 0.5 },
         prepared, silhouette,
       }]));
     };
@@ -765,7 +872,8 @@ function Studio() {
       const out = assets.map((a) => ({
         sku: a.sku, name: a.name, real_width_in: a.real_width_in,
         layer_class: a.layer_class, rotation_mode: a.rotation_mode,
-        orient: a.orient, strip_white: a.stripWhite, anchor_point: a.anchor,
+        orient: a.orient, strip_white: a.stripWhite,
+        insertion_point: a.insertion_point, visual_centroid: a.visual_centroid,
         image_dataurl: a.dataUrl,
       }));
       idbSet("assets", out).catch(() => {});
@@ -799,7 +907,7 @@ function Studio() {
             layer_class: slot ? slot.layer_class : "secondary",
             rotation_mode: slot ? slot.rotation_mode : "camera_facing",
             orient: "none", stripWhite: true,
-            anchor: { x: 0.5, y: 0.5 },
+            insertion_point: { x: 0.5, y: 0.92 }, visual_centroid: { x: 0.5, y: 0.5 },
             prepared, silhouette,
           }]));
           remaining--; if (remaining <= 0) setBusy(false);
@@ -835,11 +943,12 @@ function Studio() {
 
   const exportManifest = () => {
     const out = {
-      version: "BRC-4.0", exported: new Date().toISOString(),
+      version: "BRC-4.1", exported: new Date().toISOString(),
       assets: assets.map((a) => ({
         sku: a.sku, name: a.name, real_width_in: a.real_width_in,
         layer_class: a.layer_class, rotation_mode: a.rotation_mode,
-        orient: a.orient, strip_white: a.stripWhite, anchor_point: a.anchor,
+        orient: a.orient, strip_white: a.stripWhite,
+        insertion_point: a.insertion_point, visual_centroid: a.visual_centroid,
         image_dataurl: a.dataUrl,
       })),
     };
@@ -958,8 +1067,15 @@ function Studio() {
           <h1 style={S.title}>Wreath Render Studio</h1>
         </div>
         <div style={S.headerMeta}>
-          <span style={S.badge}>BRC-4.0</span>
+          <span style={S.badge}>BRC-4.1</span>
           <span style={S.badgeOutline}>Seeded · Logged · Reproducible</span>
+          <span
+            title={SELF_TEST.results.map((r) => (r.pass ? "✓ " : "✗ ") + r.name).join("\n")}
+            style={Object.assign({}, S.badgeOutline, SELF_TEST.pass
+              ? { borderColor: "#4A6741", color: "#4A6741" }
+              : { borderColor: "#a8502e", color: "#a8502e" })}>
+            {SELF_TEST.pass ? "compass ✓" : "self-test ✗"}
+          </span>
         </div>
       </header>
 
@@ -1218,12 +1334,12 @@ function Studio() {
                 )}
                 <div style={S.row}>
                   <button onClick={() => setOpenAsset(openAsset === a.id ? null : a.id)} style={S.btnGhost}>
-                    {openAsset === a.id ? "Close anchor" : "Set anchor"}
+                    {openAsset === a.id ? "Close anchors" : "Set anchors"}
                   </button>
                   <button onClick={() => removeAsset(a.id)} style={S.btnDanger}>Remove</button>
                 </div>
                 {openAsset === a.id && a.prepared && (
-                  <AnchorPicker asset={a} onSet={(anchor) => updateAsset(a.id, { anchor })} />
+                  <AnchorPicker asset={a} onSet={(patch) => updateAsset(a.id, patch)} />
                 )}
               </div>
             </div>
